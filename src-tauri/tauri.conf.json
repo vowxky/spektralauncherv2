@@ -42,6 +42,7 @@
     "targets": "all",
     "licenseFile": "./LICENSE.rtf",
     "icon": [
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
