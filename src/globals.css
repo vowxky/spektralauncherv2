@@ -1,0 +1,331 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@font-face {
+  font-family: "Minecraftia";
+  src: url("/src/fonts/Minecraftia-Regular.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+@font-face {
+  font-display: swap;
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./fonts/inter-v20-latin-regular.woff2") format("woff2");
+}
+@font-face {
+  font-display: swap;
+  font-family: "Minecraft";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./fonts/Minecraft Ten.woff2") format("woff2");
+}
+
+@theme {
+  --font-inter: "Inter", sans-serif;
+  --font-minecraftia: "Minecraftia", monospace;
+  --font-minecraft: "Minecraft", sans-serif;
+  --font-sans: "Inter", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --accent: oklch(72% 0.006 90);
+  --accent-foreground: oklch(99.11% 0 0);
+  --background: oklch(11% 0.004 90);
+  --border: oklch(27% 0.006 90);
+  --danger: oklch(59.4% 0.2046 26);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(26% 0.006 90);
+  --default-foreground: oklch(99.11% 0 0);
+  --field-background: oklch(19% 0.006 90);
+  --field-border: transparent;
+  --field-foreground: oklch(98% 0.004 90);
+  --field-placeholder: oklch(68% 0.006 90);
+  --focus: oklch(74% 0.006 90);
+  --foreground: oklch(98% 0.004 90);
+  --muted: oklch(68% 0.006 90);
+  --overlay: oklch(18% 0.006 90);
+  --overlay-foreground: oklch(98% 0.004 90);
+  --scrollbar: oklch(68% 0.006 90);
+  --segment: oklch(36% 0.006 90);
+  --segment-foreground: oklch(98% 0.004 90);
+  --separator: oklch(24% 0.006 90);
+  --success: oklch(73.29% 0.2012 152.18);
+  --success-foreground: oklch(21.03% 0.0059 152.18);
+  --surface: oklch(18% 0.006 90);
+  --surface-foreground: oklch(98% 0.004 90);
+  --surface-secondary: oklch(22% 0.006 90);
+  --surface-secondary-foreground: oklch(98% 0.004 90);
+  --surface-tertiary: oklch(25% 0.006 90);
+  --surface-tertiary-foreground: oklch(98% 0.004 90);
+  --warning: oklch(82.03% 0.1444 77.71);
+  --warning-foreground: oklch(21.03% 0.0059 77.71);
+  --radius: 0.125rem;
+  --field-radius: 0.25rem;
+  --font-sans: var(--font-inter);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-background: var(--background);
+  --color-border: var(--border);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-field-background: var(--field-background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-overlay: var(--overlay);
+  --color-surface: var(--surface);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-surface-tertiary: var(--surface-tertiary);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+
+.modstack-memory-slider {
+  height: 18px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.modstack-memory-slider:disabled {
+  cursor: default;
+}
+
+.modstack-memory-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--slider-fill, 0%),
+    rgba(255, 255, 255, 0.28) var(--slider-fill, 0%),
+    rgba(255, 255, 255, 0.28) 100%
+  );
+}
+
+.modstack-memory-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+.modstack-memory-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.modstack-memory-slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-accent);
+}
+
+.modstack-memory-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+[data-theme="light"] {
+  --accent: oklch(54% 0.006 90);
+  --accent-foreground: oklch(99.11% 0 0);
+  --background: oklch(96% 0.004 90);
+  --border: oklch(88% 0.006 90);
+  --danger: oklch(65.32% 0.2421 27.11);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(92% 0.004 90);
+  --default-foreground: oklch(20% 0.004 90);
+  --field-background: oklch(99% 0.004 90);
+  --field-border: transparent;
+  --field-foreground: oklch(20% 0.004 90);
+  --field-placeholder: oklch(54% 0.006 90);
+  --focus: oklch(54% 0.006 90);
+  --foreground: oklch(20% 0.004 90);
+  --muted: oklch(54% 0.006 90);
+  --overlay: oklch(99% 0.004 90);
+  --overlay-foreground: oklch(20% 0.004 90);
+  --scrollbar: oklch(84% 0.006 90);
+  --segment: oklch(98% 0.004 90);
+  --segment-foreground: oklch(20% 0.004 90);
+  --separator: oklch(90% 0.006 90);
+  --success: oklch(73.29% 0.2012 152.18);
+  --success-foreground: oklch(21.03% 0.0059 152.18);
+  --surface: oklch(99% 0.004 90);
+  --surface-foreground: oklch(20% 0.004 90);
+  --surface-secondary: oklch(94% 0.004 90);
+  --surface-secondary-foreground: oklch(20% 0.004 90);
+  --surface-tertiary: oklch(91% 0.004 90);
+  --surface-tertiary-foreground: oklch(20% 0.004 90);
+  --warning: oklch(78.19% 0.1648 73.7);
+  --warning-foreground: oklch(21.03% 0.0059 73.7);
+}
+
+.theme-tint-media {
+  filter: none !important;
+  transition: filter 180ms ease;
+}
+
+@keyframes presence-badge-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.presence-badge {
+  animation: presence-badge-in 160ms ease-out;
+}
+
+@keyframes launcher-soft-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes login-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-16px) scale(1.08);
+  }
+}
+
+@keyframes login-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes login-zoom {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(1.06);
+  }
+}
+
+button,
+a,
+[role="button"],
+input,
+textarea,
+select {
+  transition-property: background-color, border-color, color, opacity, box-shadow, filter, transform;
+  transition-duration: 180ms;
+  transition-timing-function: ease-out;
+}
+
+button:not(:disabled):active,
+[role="button"]:active {
+  transform: scale(0.985);
+}
+
+button:not(:disabled):hover,
+[role="button"]:hover {
+  filter: brightness(1.04);
+}
+
+.bg-surface,
+.bg-surface-secondary,
+.bg-surface-tertiary,
+[class*="bg-surface"],
+[class*="border-white/10"] {
+  transition-property: background-color, border-color, box-shadow, opacity, filter, transform;
+  transition-duration: 200ms;
+  transition-timing-function: ease-out;
+}
+
+#root > * {
+  animation: launcher-soft-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+* {
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  scrollbar-color: var(--scrollbar) var(--background);
+}
+
+*[data-tauri-drag-region] {
+  app-region: drag;
+}
+
+/* ::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-accent);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2e4d35;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #18281c;
+} */
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

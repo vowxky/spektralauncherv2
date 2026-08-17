@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spektra</title>
+    <script type="module">
+      import { getCurrentWindow } from "@tauri-apps/api/window";
+      getCurrentWindow()
+        .theme()
+        .then((theme) => {
+          document.documentElement.setAttribute("data-theme", theme || "light");
+        });
+    </script>
+  </head>
+  <body style="background-color: #272727">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
