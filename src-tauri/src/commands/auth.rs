@@ -117,33 +117,12 @@ pub async fn login_microsoft() -> Result<Value, String> {
         .map_err(|e| map_minecraft_auth_error(e))?;
 
     // Perfil de Minecraft — aquí falla el "no encuentra su perfil"
-    // Si solo tiene Xbox (Game Pass sin Java, o cuenta nueva sin perfil), NO bloqueamos:
-    // hacemos fallback a Xbox/Ms Graph y dejamos entrar igual. Podrá jugar instancias noPremium/offline.
-    let (profile_name, profile_id) = match get_minecraft_profile(mc_token.access_token().as_ref()).await {
-        Ok(profile) => {
-            // Verificar entitlements solo como warning si tiene perfil
-            if let Err(e) = check_minecraft_entitlements(mc_token.access_token().as_ref()).await {
-                eprintln!("[auth] advertencia entitlements: {}", e);
-            }
-            (
-                profile["name"].as_str().unwrap().to_string(),
-                profile["id"].as_str().unwrap().to_string(),
-            )
-        }
-        Err(e) if e.contains("404") => {
-            // Fallback: aceptar Xbox y ya — usar gamertag/displayName de Microsoft
-            let fallback_name = get_fallback_display_name(&ms_access_token)
-                .await
-                .unwrap_or_else(|_| "Player".to_string());
-            let fallback_id = offline_uuid(&fallback_name);
-            eprintln!(
-                "[auth] sin perfil Minecraft (404), usando fallback Xbox: {} ({}) — error original: {}",
-                fallback_name, fallback_id, e
-            );
-            (fallback_name, fallback_id)
-        }
-        Err(e) => return Err(e),
-    };
+    let profile = get_minecraft_profile(mc_token.access_token().as_ref()).await.map_err(|e| e)?;
+    if let Err(e) = check_minecraft_entitlements(mc_token.access_token().as_ref()).await {
+        eprintln!("[auth] advertencia entitlements: {}", e);
+    }
+    let profile_name = profile["name"].as_str().unwrap().to_string();
+    let profile_id = profile["id"].as_str().unwrap().to_string();
 
     Ok(json!({
         "type": "microsoft",
@@ -394,39 +373,70 @@ fn offline_uuid(username: &str) -> String {
     )
 }
 
-async fn get_fallback_display_name(ms_access_token: &str) -> Result<String, String> {
+async fn get_xbox_gamertag(ms_access_token: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
-    // Intentar Microsoft Graph primero
-    let resp = client
-        .get("https://graph.microsoft.com/v1.0/me")
-        .bearer_auth(ms_access_token)
+    // 1) Xbox Live authenticate para obtener XBL token
+    let xbl_resp = client
+        .post("https://user.auth.xboxlive.com/user/authenticate")
+        .json(&json!({
+            "Properties": {
+                "AuthMethod": "RPS",
+                "SiteName": "user.auth.xboxlive.com",
+                "RpsTicket": format!("d={}", ms_access_token)
+            },
+            "RelyingParty": "http://auth.xboxlive.com",
+            "TokenType": "JWT"
+        }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if resp.status().is_success() {
-        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
-        if let Some(name) = v.get("displayName").and_then(|x| x.as_str()) {
-            if !name.trim().is_empty() {
-                return Ok(name.trim().to_string());
-            }
-        }
-        if let Some(mail) = v.get("mail").and_then(|x| x.as_str()) {
-            if let Some(prefix) = mail.split('@').next() {
-                if !prefix.is_empty() {
-                    return Ok(prefix.to_string());
-                }
-            }
-        }
-        if let Some(upn) = v.get("userPrincipalName").and_then(|x| x.as_str()) {
-            if let Some(prefix) = upn.split('@').next() {
-                if !prefix.is_empty() {
-                    return Ok(prefix.to_string());
-                }
-            }
-        }
+    if !xbl_resp.status().is_success() {
+        return Err(format!("XBL auth falló: {}", xbl_resp.status()));
     }
-    // Fallback final: usar el gamertag de Xbox si Graph falla
-    Err("no displayName".to_string())
+    let xbl_json: Value = xbl_resp.json().await.map_err(|e| e.to_string())?;
+    let xbl_token = xbl_json
+        .get("Token")
+        .and_then(|v| v.as_str())
+        .ok_or("XBL sin Token")?
+        .to_string();
+    let user_hash = xbl_json
+        .get("DisplayClaims")
+        .and_then(|v| v.get("xui"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|o| o.get("uhs"))
+        .and_then(|v| v.as_str())
+        .ok_or("XBL sin uhs")?
+        .to_string();
+
+    // 2) Profile settings para gamertag
+    let profile_resp = client
+        .get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag")
+        .header("Authorization", format!("XBL3.0 x={};{}", user_hash, xbl_token))
+        .header("x-xbl-contract-version", "2")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !profile_resp.status().is_success() {
+        return Err(format!("Xbox profile falló: {}", profile_resp.status()));
+    }
+    let profile_json: Value = profile_resp.json().await.map_err(|e| e.to_string())?;
+    let gamertag = profile_json
+        .get("profileUsers")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|u| u.get("settings"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().find(|s| s.get("id").and_then(|v| v.as_str()) == Some("Gamertag")))
+        .and_then(|s| s.get("value"))
+        .and_then(|v| v.as_str())
+        .ok_or("Gamertag no encontrado")?
+        .trim()
+        .to_string();
+    if gamertag.is_empty() {
+        return Err("Gamertag vacío".to_string());
+    }
+    Ok(gamertag)
 }
 
 #[command]
