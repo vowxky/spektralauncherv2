@@ -34,6 +34,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
     try {
       const result = await invoke("login_microsoft") as User
       setUser(result)
+      // Mantener lista de cuentas (para multi-cuenta / refresco futuro)
+      setUserList(prev => {
+        const key = userKey(result)
+        const idx = prev.findIndex(u => userKey(u) === key)
+        if (idx >= 0) {
+          const copy = [...prev]
+          copy[idx] = result
+          return copy
+        }
+        return [...prev, result]
+      })
       return result
     } catch (e) {
       console.error(e)
@@ -98,6 +109,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
 
   const updateUser = useCallback((updated: User) => {
     setUser(updated)
+    setUserList(prev => {
+      const key = userKey(updated)
+      const idx = prev.findIndex(u => userKey(u) === key)
+      if (idx >= 0) {
+        const copy = [...prev]
+        copy[idx] = updated
+        return copy
+      }
+      return [...prev, updated]
+    })
   }, [])
 
   const refreshMicrosoftToken = useCallback(async (): Promise<string | null> => {
@@ -109,7 +130,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
     try {
       const result = await invoke<{ access_token: string; refresh_token: string; ms_access_token: string }>(
         "refresh_microsoft_token",
-        { refreshToken }
+        { refresh_token: refreshToken }
       )
 
       const updatedUser: User = {
@@ -123,10 +144,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
       }
 
       setUser(updatedUser)
-      return result.ms_access_token
+      // Mantener userList sincronizado (evita que el token viejo quede guardado)
+      setUserList(prev => {
+        const key = userKey(updatedUser)
+        const exists = prev.some(u => userKey(u) === key)
+        if (exists) return prev.map(u => userKey(u) === key ? updatedUser : u)
+        return [...prev, updatedUser]
+      })
+      return result.access_token
     } catch (e) {
       console.error("Error refrescando token:", e)
-      return null
+      throw e
     }
   }, [user])
 

@@ -114,17 +114,42 @@ pub async fn login_microsoft() -> Result<Value, String> {
     let mc_token = mc_flow
         .exchange_microsoft_token(&ms_access_token)
         .await
-        .map_err(|e| format!("Error getting Minecraft token: {}", e))?;
+        .map_err(|e| map_minecraft_auth_error(e))?;
 
-    let profile = get_minecraft_profile(mc_token.access_token().as_ref())
-        .await
-        .map_err(|e| format!("Error getting profile: {}", e))?;
+    // Perfil de Minecraft — aquí falla el "no encuentra su perfil"
+    // Si solo tiene Xbox (Game Pass sin Java, o cuenta nueva sin perfil), NO bloqueamos:
+    // hacemos fallback a Xbox/Ms Graph y dejamos entrar igual. Podrá jugar instancias noPremium/offline.
+    let (profile_name, profile_id) = match get_minecraft_profile(mc_token.access_token().as_ref()).await {
+        Ok(profile) => {
+            // Verificar entitlements solo como warning si tiene perfil
+            if let Err(e) = check_minecraft_entitlements(mc_token.access_token().as_ref()).await {
+                eprintln!("[auth] advertencia entitlements: {}", e);
+            }
+            (
+                profile["name"].as_str().unwrap().to_string(),
+                profile["id"].as_str().unwrap().to_string(),
+            )
+        }
+        Err(e) if e.contains("404") => {
+            // Fallback: aceptar Xbox y ya — usar gamertag/displayName de Microsoft
+            let fallback_name = get_fallback_display_name(&ms_access_token)
+                .await
+                .unwrap_or_else(|_| "Player".to_string());
+            let fallback_id = offline_uuid(&fallback_name);
+            eprintln!(
+                "[auth] sin perfil Minecraft (404), usando fallback Xbox: {} ({}) — error original: {}",
+                fallback_name, fallback_id, e
+            );
+            (fallback_name, fallback_id)
+        }
+        Err(e) => return Err(e),
+    };
 
     Ok(json!({
         "type": "microsoft",
         "minecraft": {
-            "name": profile["name"],
-            "uuid": profile["id"],
+            "name": profile_name,
+            "uuid": profile_id,
             "access_token": mc_token.access_token().as_ref(),
             "refresh_token": ms_refresh_token,
             "ms_access_token": ms_access_token
@@ -187,23 +212,47 @@ pub async fn refresh_microsoft_token(refresh_token: String) -> Result<Value, Str
     let json: Value = res.json().await.map_err(|e| e.to_string())?;
 
     if let Some(err) = json.get("error") {
-        return Err(format!("Error refresh: {}", err));
+        let desc = json
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // invalid_grant = refresh expirado o revocado -> necesita login de nuevo
+        if err.as_str() == Some("invalid_grant") {
+            return Err(
+                "Sesión expirada: vuelve a iniciar sesión con Microsoft (refresh_token inválido)".to_string(),
+            );
+        }
+        return Err(format!("Error refresh: {} — {}", err, desc));
     }
 
     let new_ms_access = json["access_token"]
         .as_str()
-        .ok_or("No access_token")?
+        .ok_or("No access_token en refresh")?
         .to_string();
+    // Microsoft a veces no rota el refresh_token, reusamos el anterior si no viene
     let new_ms_refresh = json["refresh_token"]
         .as_str()
-        .ok_or("No refresh_token")?
-        .to_string();
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| refresh_token.clone());
 
     let mc_flow = MinecraftAuthorizationFlow::new(reqwest::Client::new());
     let mc_token = mc_flow
         .exchange_microsoft_token(&new_ms_access)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| map_minecraft_auth_error(e))?;
+
+    // Re-validar perfil en refresh — si es 404 (cuenta solo Xbox) no bloqueamos, solo avisamos
+    if let Err(e) = get_minecraft_profile(mc_token.access_token().as_ref()).await {
+        if e.contains("404") {
+            eprintln!("[auth] refresh sin perfil Minecraft (cuenta solo Xbox), continúa con fallback: {}", e);
+        } else {
+            return Err(e);
+        }
+    }
+    // Entitlements solo como warning
+    if let Err(e) = check_minecraft_entitlements(mc_token.access_token().as_ref()).await {
+        eprintln!("[auth] advertencia entitlements en refresh: {}", e);
+    }
 
     Ok(json!({
         "access_token": mc_token.access_token().as_ref(),
@@ -252,6 +301,16 @@ async fn exchange_code(code: &str, code_verifier: &str) -> Result<(String, Strin
     Ok((access_token, refresh_token))
 }
 
+fn map_minecraft_auth_error(e: minecraft_msa_auth::MinecraftAuthorizationError) -> String {
+    use minecraft_msa_auth::MinecraftAuthorizationError::*;
+    match e {
+        NoXbox => "Tu cuenta Microsoft no tiene perfil de Xbox. Créalo gratis en https://www.xbox.com y vuelve a intentar.".to_string(),
+        AddToFamily => "Tu cuenta es de menor y debe ser añadida a una familia Microsoft (https://family.microsoft.com).".to_string(),
+        MissingClaims => format!("Error de autenticación Xbox (MissingClaims): {}", e),
+        Reqwest(err) => format!("Error de red autenticando con Xbox/Minecraft: {}", err),
+    }
+}
+
 async fn get_minecraft_profile(access_token: &str) -> Result<Value, String> {
     let client = reqwest::Client::new();
 
@@ -262,12 +321,112 @@ async fn get_minecraft_profile(access_token: &str) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    if response.status() == 404 {
+        return Err(
+            "No se encontró perfil de Minecraft (404). Tu cuenta no tiene Minecraft Java Edition o aún no creaste un perfil en minecraft.net. Nota: Xbox Game Pass de consola NO incluye Java Edition — necesitas PC Game Pass o comprar el juego. Si acabas de comprar/migrar, entra una vez a minecraft.net y crea tu perfil.".to_string()
+        );
+    }
+    if response.status() == 401 || response.status() == 403 {
+        return Err(format!(
+            "Token de Minecraft no autorizado ({}). Vuelve a iniciar sesión. Si el problema persiste, tu cuenta no posee el juego.",
+            response.status()
+        ));
+    }
+    if response.status() == 429 {
+        return Err("Rate limited por api.minecraftservices.com (429). Intenta de nuevo en unos segundos.".to_string());
+    }
     if !response.status().is_success() {
-        return Err(format!("Error perfil: {}", response.status()));
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Error obteniendo perfil de Minecraft: {} — {}", status, body));
     }
 
     let profile: Value = response.json().await.map_err(|e| e.to_string())?;
+    // Validar que tenga name e id
+    if profile.get("name").and_then(|v| v.as_str()).is_none()
+        || profile.get("id").and_then(|v| v.as_str()).is_none()
+    {
+        return Err("Respuesta de perfil inválida (sin name/id). Intenta de nuevo.".to_string());
+    }
     Ok(profile)
+}
+
+async fn check_minecraft_entitlements(access_token: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.minecraftservices.com/entitlements/mcstore")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        // Si falla entitlements no bloqueamos duro, pero avisamos
+        // 401/403 aquí también indica token inválido
+        if resp.status() == 401 || resp.status() == 403 {
+            return Err("No autorizado al verificar licencias (entitlements). Vuelve a iniciar sesión.".to_string());
+        }
+        // Otros errores los logueamos pero no bloqueamos el login si ya tenemos perfil
+        return Ok(());
+    }
+
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let items = json.get("items").and_then(|v| v.as_array());
+    let has_entitlement = items.map(|arr| !arr.is_empty()).unwrap_or(false);
+    // Algunos Game Pass devuelven items vacíos pero permiten jugar Bedrock; para Java debe haber item
+    if !has_entitlement {
+        return Err(
+            "Tu cuenta no posee Minecraft Java Edition (sin entitlements). Con Xbox Game Pass de consola no alcanza — es solo para Bedrock/consola. Necesitas PC Game Pass (incluye Java) o comprar Java Edition. Verifica en https://www.minecraft.net/en-us/entitlements/mcstore .".to_string()
+        );
+    }
+    Ok(())
+}
+
+fn offline_uuid(username: &str) -> String {
+    let name = format!("OfflinePlayer:{}", username);
+    let digest = md5::compute(name.as_bytes());
+    let mut bytes = digest.0;
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+async fn get_fallback_display_name(ms_access_token: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    // Intentar Microsoft Graph primero
+    let resp = client
+        .get("https://graph.microsoft.com/v1.0/me")
+        .bearer_auth(ms_access_token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(name) = v.get("displayName").and_then(|x| x.as_str()) {
+            if !name.trim().is_empty() {
+                return Ok(name.trim().to_string());
+            }
+        }
+        if let Some(mail) = v.get("mail").and_then(|x| x.as_str()) {
+            if let Some(prefix) = mail.split('@').next() {
+                if !prefix.is_empty() {
+                    return Ok(prefix.to_string());
+                }
+            }
+        }
+        if let Some(upn) = v.get("userPrincipalName").and_then(|x| x.as_str()) {
+            if let Some(prefix) = upn.split('@').next() {
+                if !prefix.is_empty() {
+                    return Ok(prefix.to_string());
+                }
+            }
+        }
+    }
+    // Fallback final: usar el gamertag de Xbox si Graph falla
+    Err("no displayName".to_string())
 }
 
 #[command]

@@ -1,6 +1,6 @@
 [package]
 name = "Spektra"
-version = "1.0.3"
+version = "1.0.4"
 description = "Spektra"
 authors = ["primeCigarrete"]
 license = "ARR"

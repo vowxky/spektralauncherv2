@@ -56,7 +56,7 @@ export function InstanceProvider({
   const [instances, setInstances] = useState<Instance[]>([]);
   const [installedInstances, setInstalledInstances] = useState<Instance[]>([]);
   const [selectedInstance, setSelectedInstance] = useState<Instance>();
-  const { user } = useAuth();
+  const { user, refreshMicrosoftToken } = useAuth();
   const { maxRAM, windowWidth, windowHeight, fullscreen, downloadConcurrency, forceIpv4, dnsOverHttps } = useSettings();
   const [launchedInstanceId, setLaunchedInstanceId] = useState<string | null>(null);
   const [accessBlocked, setAccessBlocked] = useState<string | null>(null);
@@ -252,15 +252,19 @@ export function InstanceProvider({
       let freshToken = accessToken ?? "none";
       if (!isOffline && user?.type === "microsoft" && user?.minecraft?.refresh_token) {
         try {
-          const refreshed = await invoke<any>("refresh_microsoft_token", {
-            refreshToken: user.minecraft.refresh_token,
-          });
-          if (refreshed?.access_token) {
-            freshToken = refreshed.access_token;
-            (user.minecraft as any).access_token = refreshed.access_token;
-            (user.minecraft as any).refresh_token = refreshed.refresh_token;
+          const newAccess = await refreshMicrosoftToken();
+          if (newAccess) freshToken = newAccess;
+        } catch (e: any) {
+          // Si el refresh falla por invalid_grant / sin entitlements, avisamos y bloqueamos launch
+          const msg = String(e ?? "Error refrescando token");
+          if (msg.includes("Sesión expirada") || msg.includes("invalid_grant") || msg.includes("No se encontró perfil") || msg.includes("no posee Minecraft")) {
+            toast.danger("Sesión expirada o sin licencia", {
+              description: msg,
+            });
+            return;
           }
-        } catch {
+          // Fallback: usar token viejo (puede seguir válido unos minutos)
+          console.warn("Refresh falló, usando token existente:", e);
           freshToken = accessToken ?? "none";
         }
       }
@@ -367,7 +371,7 @@ export function InstanceProvider({
         });
       }
     },
-    [user, maxRAM, windowWidth, windowHeight, fullscreen, downloadConcurrency, forceIpv4, dnsOverHttps, addRunning, removeRunning, addPending, removePending],
+    [user, refreshMicrosoftToken, maxRAM, windowWidth, windowHeight, fullscreen, downloadConcurrency, forceIpv4, dnsOverHttps, addRunning, removeRunning, addPending, removePending],
   );
 
   return (

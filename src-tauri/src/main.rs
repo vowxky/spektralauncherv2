@@ -3,8 +3,8 @@
 mod commands;
 mod core;
 mod discord;
-mod logger;
 mod java_runtime;
+mod logger;
 mod state;
 mod utils;
 
@@ -67,7 +67,6 @@ fn disable_tracking_prevention(webview: &tauri::WebviewWindow) {
 }
 
 fn main() {
-
     #[cfg(target_os = "windows")]
     {
         std::env::set_var(
@@ -82,12 +81,6 @@ fn main() {
             || std::env::var("XDG_SESSION_TYPE")
                 .map(|v| v == "wayland")
                 .unwrap_or(false);
-
-        if !is_wayland {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        }
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
     }
 
     std::thread::spawn(|| {
