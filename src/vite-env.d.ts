@@ -41,6 +41,11 @@ interface User {
     name: string;
     refresh_token: string;
     ms_access_token: string;
+    // Expiración — guardado por el backend (ms) para refresh proactivo
+    expires_at?: number;
+    expires_in?: number;
+    ms_expires_at?: number;
+    ms_expires_in?: number;
     user_properties: "{}";
     meta: {
       type: "Xbox";

@@ -37,6 +37,21 @@ export function defaultInstanceRuntimeSettings(globalMaxRam = 4096, width = 854,
   };
 }
 
+function b64enc(s: string): string {
+  try { return btoa(unescape(encodeURIComponent(s))); } catch { return btoa(s); }
+}
+function b64dec(s: string): string {
+  try { return decodeURIComponent(escape(atob(s))); } catch { return atob(s); }
+}
+function readRaw(key: string): string | null {
+  const raw = window.localStorage.getItem(key);
+  if (!raw) return null;
+  // compat: plain JSON vs base64
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return raw;
+  try { return b64dec(raw); } catch { return raw; }
+}
+
 export function loadInstanceRuntimeSettings(
   instanceId: string,
   globalMaxRam = 4096,
@@ -46,7 +61,7 @@ export function loadInstanceRuntimeSettings(
 ): InstanceRuntimeSettings {
   const defaults = defaultInstanceRuntimeSettings(globalMaxRam, width, height, fullscreen);
   try {
-    const raw = window.localStorage.getItem(`${STORAGE_PREFIX}${instanceId}`);
+    const raw = readRaw(`${STORAGE_PREFIX}${instanceId}`);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<InstanceRuntimeSettings>;
     return {
@@ -64,12 +79,13 @@ export function loadInstanceRuntimeSettings(
 }
 
 export function saveInstanceRuntimeSettings(instanceId: string, settings: InstanceRuntimeSettings) {
-  window.localStorage.setItem(`${STORAGE_PREFIX}${instanceId}`, JSON.stringify(settings));
+  const json = JSON.stringify(settings);
+  window.localStorage.setItem(`${STORAGE_PREFIX}${instanceId}`, b64enc(json));
 }
 
 export function runtimeSettingsForLaunch(instanceId: string): InstanceRuntimeSettings | null {
   try {
-    const raw = window.localStorage.getItem(`${STORAGE_PREFIX}${instanceId}`);
+    const raw = readRaw(`${STORAGE_PREFIX}${instanceId}`);
     return raw ? (JSON.parse(raw) as InstanceRuntimeSettings) : null;
   } catch {
     return null;

@@ -29,6 +29,8 @@ use minecraft_java_rs_core::{
 use tokio::sync::mpsc;
 
 const VERIFY_URL: &str = "http://gs00s44ogw8cc0wc4s4kwwc0.51.222.106.204.sslip.io/";
+const LAUNCHER_ID: &str = "spektra";
+const API_URL: &str = "https://fitzxel-cl-api.vercel.app/v2";
 
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -94,9 +96,8 @@ fn sha1_hex(bytes: &[u8]) -> String {
 }
 
 #[command]
-pub async fn get_instances(launcher_id: String) -> Result<Vec<Value>, String> {
-    let api_url = "https://fitzxel-cl-api.vercel.app/v2";
-    let url = format!("{}/{}/instances", api_url, launcher_id);
+pub async fn get_instances() -> Result<Vec<Value>, String> {
+    let url = format!("{}/{}/instances", API_URL, LAUNCHER_ID);
     let client = build_client();
     let resp = client
         .get(&url)
@@ -128,11 +129,9 @@ pub async fn verify_account(name: String) -> Result<bool, String> {
 
 #[command]
 pub async fn get_instance(
-    launcher_id: String,
     id: Option<String>,
     slug: Option<String>,
 ) -> Result<Value, String> {
-    let api_url = "https://fitzxel-cl-api.vercel.app/v2";
     let query = if let Some(i) = id {
         format!("id={}", i)
     } else if let Some(s) = slug {
@@ -140,7 +139,7 @@ pub async fn get_instance(
     } else {
         return Err("No instance specified".into());
     };
-    let url = format!("{}/{}/instance?{}", api_url, launcher_id, query);
+    let url = format!("{}/{}/instance?{}", API_URL, LAUNCHER_ID, query);
     let client = build_client();
     let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if response.status() == 404 {
@@ -162,8 +161,38 @@ pub fn discord_set_idle() {
 }
 
 #[command]
-pub fn discord_set_playing(name: String) {
-    discord::set_playing(&name);
+pub fn discord_set_home() {
+    discord::set_home();
+}
+
+#[command]
+pub fn discord_set_login() {
+    discord::set_login();
+}
+
+#[command]
+pub fn discord_set_settings() {
+    discord::set_settings();
+}
+
+#[command]
+pub fn discord_set_browsing() {
+    discord::set_browsing();
+}
+
+#[command]
+pub fn discord_set_downloading(name: String, progress: Option<u8>) {
+    discord::set_downloading(&name, progress);
+}
+
+#[command]
+pub fn discord_set_installing(name: String) {
+    discord::set_installing(&name);
+}
+
+#[command]
+pub fn discord_set_playing(name: String, loader: Option<String>) {
+    discord::set_playing(&name, loader.as_deref());
 }
 
 #[command]
@@ -208,8 +237,7 @@ pub async fn install_instance_files(
     let instance_dir = instance.path.clone();
     fs::create_dir_all(&instance_dir).ok();
 
-    let api_url = "https://fitzxel-cl-api.vercel.app/v2".to_string();
-    let url = format!("{}/instance/{}/files", api_url, instance_id);
+    let url = format!("{}/instance/{}/files", API_URL, instance_id);
     let client = build_client_with_timeout(300);
     let files: Vec<Value> = client
         .get(&url)
@@ -474,6 +502,7 @@ pub async fn launch_instance_cmd(
     username: String,
     uuid: String,
     token: String,
+    xuid: Option<String>,
     ram: u64,
     width: i32,
     height: i32,
@@ -518,17 +547,16 @@ pub async fn launch_instance_cmd(
         loader
     );
 
-    let is_offline = token == "none" || token.is_empty();
-    let effective_uuid = if is_offline {
-        offline_uuid(&username)
-    } else {
-        uuid.clone()
-    };
-    let effective_token = if is_offline {
-        "0".to_string()
-    } else {
-        token.clone()
-    };
+    if token == "none" || token.is_empty() {
+        return Err("Se requiere cuenta premium. Inicia sesión con Microsoft.".to_string());
+    }
+    let effective_uuid = uuid.clone();
+    let effective_token = token.clone();
+    let xbox_account = xuid
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|xuid| minecraft_java_rs_core::models::minecraft::XboxAccount { xuid });
 
     let engine_dir = crate::commands::config::get_install_dir_path().join("engine_data");
     fs::create_dir_all(&engine_dir).ok();
@@ -635,7 +663,7 @@ pub async fn launch_instance_cmd(
             access_token: effective_token,
             name: username.clone(),
             uuid: effective_uuid,
-            xbox_account: None,
+            xbox_account,
             user_properties: None,
             client_id: None,
             client_token: None,
@@ -663,7 +691,7 @@ pub async fn launch_instance_cmd(
             .unwrap_or(false)
             .then(|| IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
         timeout_secs: 30,
-        bypass_offline: is_offline,
+        bypass_offline: false,
         java: java_options,
         game_args: vec![],
         verify: false,
@@ -1083,6 +1111,24 @@ pub async fn stop_instance(instance_id: String, state: State<'_, AppState>) -> R
 #[command]
 pub fn get_running_instances(state: State<'_, AppState>) -> Vec<String> {
     state.running.lock().unwrap().keys().cloned().collect()
+}
+
+#[command]
+pub fn get_log_path() -> Result<String, String> {
+    let dir = crate::logger::log_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[command]
+pub fn clear_instance_logs(instance_id: String) -> Result<(), String> {
+    crate::logger::clear_logs(&instance_id);
+    Ok(())
+}
+
+#[command]
+pub fn get_instance_logs_tail(instance_id: String, lines: Option<usize>) -> Vec<String> {
+    crate::logger::read_log_tail(&instance_id, lines.unwrap_or(200))
 }
 
 #[command]

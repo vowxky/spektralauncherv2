@@ -9,6 +9,7 @@ import {
 import { useSettings } from "../stores/settingsContext";
 import { useNavigation } from "../hooks/useNavigation";
 
+// NOTE: mirrors globals.css design tokens (--background, --surface, --border, --foreground, --muted).
 const C = {
   bg: "#0a0a0c",
   surface: "#111113",

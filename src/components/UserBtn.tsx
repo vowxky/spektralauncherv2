@@ -27,7 +27,7 @@ export default function UserBtn() {
               className="size-8 rounded"
             />
           )}
-          <span className="max-w-32 truncate text-sm font-semibold text-foreground">
+          <span className="max-w-32 truncate break-words text-sm font-semibold text-foreground">
             {displayName}
           </span>
         </Button>

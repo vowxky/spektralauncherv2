@@ -1,10 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 
-const LAUNCHER_ID = import.meta.env.VITE_LAUNCHER_ID || 'spektra'
-
 export const getInstances = async (): Promise<Instance[]> => {
   try {
-    const data = await invoke<any[]>('get_instances', { launcherId: LAUNCHER_ID })
+    const data = await invoke<any[]>('get_instances')
     return data as Instance[]
   } catch (err) {
     console.error('Error fetching instances', err)
@@ -17,7 +15,6 @@ export const getInstance = async ({ id, slug }: { id?: string, slug?: string }):
 
   try {
     const data = await invoke<any>('get_instance', {
-      launcherId: LAUNCHER_ID,
       id: id ?? null,
       slug: slug ?? null,
     })

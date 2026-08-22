@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface DownloadProgress {
@@ -91,6 +92,35 @@ export function LaunchProvider({ children }: { children: ReactNode }) {
       next.delete(id);
       return next;
     });
+  }, []);
+
+  // Hidratar + polling contra el backend como fuente de verdad
+  // Fix "Sin instancias activas" aunque MC siga abierto (el Set en memoria se pierde al reiniciar)
+  useEffect(() => {
+    const sync = () => {
+      invoke<string[]>("get_running_instances")
+        .then((ids) => {
+          if (!Array.isArray(ids)) return;
+          setRunningInstances((prev) => {
+            const next = new Set(ids);
+            // evitar rerender si es idéntico
+            if (prev.size !== next.size) return next;
+            for (const id of next) if (!prev.has(id)) return next;
+            return prev;
+          });
+        })
+        .catch(() => {});
+    };
+    sync();
+    const iv = window.setInterval(sync, 2000);
+    const onFocus = () => sync();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.clearInterval(iv);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("visibilitychange", onFocus);
+    };
   }, []);
 
   useEffect(() => {

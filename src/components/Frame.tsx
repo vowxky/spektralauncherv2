@@ -5,6 +5,7 @@ import { useInstance } from "../stores/instanceContext";
 import { useUpdate } from "../stores/updateContext";
 import { useIntro } from "../stores/introStore";
 import { Button, ProgressBar } from "@heroui/react";
+import TruncatedText from "./TruncatedText";
 import { RunningInstances } from "./RunningInstances";
 import {
   IconDownload,
@@ -108,18 +109,18 @@ function DownloadsPopup() {
               <IconX size={12} />
             </Button>
           </div>
-          <div className="flex flex-col gap-3 px-3 py-3">
+          <div className="flex flex-col gap-3 px-3 py-3 max-h-[50vh] overflow-y-auto">
             {downloads.map((item) => (
-              <div key={item.id} className="flex flex-col gap-1">
-                <span className="text-sm font-semibold text-foreground">{item.title ?? item.name}</span>
+              <div key={item.id} className="flex min-w-0 flex-col gap-1">
+                <TruncatedText text={item.title ?? item.name} className="text-sm font-semibold text-foreground" />
                 <ProgressBar value={item.progress} isIndeterminate={item.indeterminate}>
                   <ProgressBar.Track>
                     <ProgressBar.Fill />
                   </ProgressBar.Track>
                 </ProgressBar>
-                <div className="flex items-center justify-start gap-1.5 text-xs text-muted w-full">
+                <div className="flex min-w-0 items-center justify-start gap-1.5 text-xs text-muted w-full">
                   <span className="shrink-0">{item.progress}%</span>
-                  <span>{item.status}</span>
+                  <span className="min-w-0 flex-1 truncate break-words">{item.status}</span>
                 </div>
               </div>
             ))}

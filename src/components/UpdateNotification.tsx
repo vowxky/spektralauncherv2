@@ -49,8 +49,10 @@ export function UpdateNotification() {
             <p className="text-sm font-semibold text-foreground">
               Actualización descargada
             </p>
-            <p className="text-xs text-muted mt-0.5">
-              {'Una nueva versión de Spektra está lista para ser instalada'.replace("{version}", version ?? "")}
+            <p className="text-xs text-muted mt-0.5 break-words">
+              {version
+                ? `La versión ${version} de Spektra está lista para instalarse.`
+                : 'Una nueva versión de Spektra está lista para instalarse.'}
             </p>
 
             <div className="mt-3 flex items-center gap-2">

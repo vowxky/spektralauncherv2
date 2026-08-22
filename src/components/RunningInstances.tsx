@@ -4,12 +4,10 @@ import { Button } from "@heroui/react";
 import { IconPlayerPlay, IconPlayerStop, IconX } from "@tabler/icons-react";
 import { useLaunch } from "../stores/launchContext";
 import { useInstance } from "../stores/instanceContext";
-import { useNavigation } from "../hooks/useNavigation";
 
 export function RunningInstances() {
   const { runningInstances } = useLaunch();
   const { instances } = useInstance();
-  const push = useNavigation((state) => state.push);
   const [open, setOpen] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
 
@@ -24,9 +22,9 @@ export function RunningInstances() {
   const displayName = (instance: Instance) =>
     instance.title || instance.slug || instance.id;
 
-  const runningDetails = [...runningInstances].map((id) => {
-    return resolveInstance(id);
-  });
+  const runningDetails = [...runningInstances].map(resolveInstance);
+  // Si no hay ninguna corriendo pero sí hay al menos una disponible, mostrar su nombre como hint
+  const fallbackInstance = !hasRunning ? (instances[0] ?? null) : null;
 
   useEffect(() => {
     if (!open) return;
@@ -50,12 +48,6 @@ export function RunningInstances() {
     }
   };
 
-  const handleNavigate = (instanceId: string) => {
-    window.dispatchEvent(new CustomEvent("open-local-instance", { detail: instanceId }));
-    push("instances");
-    setOpen(false);
-  };
-
   return (
     <div className="relative flex items-center" ref={popupRef}>
       <Button
@@ -72,21 +64,28 @@ export function RunningInstances() {
         {hasRunning ? (
           <>
             <span className="size-1.5 rounded-full bg-success animate-pulse shrink-0" />
-            <span className="text-xs max-w-[140px] truncate">
+            <span className="max-w-[140px] truncate break-words text-xs">
               {count === 1 ? displayName(runningDetails[0]) : `${count} running`}
+            </span>
+          </>
+        ) : fallbackInstance ? (
+          <>
+            <IconPlayerPlay size={13} className="opacity-50 shrink-0" />
+            <span className="max-w-[140px] truncate break-words text-xs opacity-70">
+              {displayName(fallbackInstance)}
             </span>
           </>
         ) : (
           <>
             <IconPlayerPlay size={13} className="opacity-35 shrink-0" />
-            <span className="text-xs opacity-35">Sin instancias activas</span>
+            <span className="truncate text-xs opacity-35">Sin instancias activas</span>
           </>
         )}
       </Button>
 
       {open && hasRunning && (
-        <div className="absolute right-0 top-full mt-1 min-w-[260px] z-50 rounded-lg border border-white/10 bg-surface shadow-xl">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+        <div className="absolute right-0 top-full mt-1 z-50 max-w-xs min-w-[260px] w-max rounded-lg border border-white/10 bg-surface shadow-xl">
+          <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <span className="size-2 rounded-full bg-success animate-pulse" />
               Ejecutandose
@@ -105,7 +104,7 @@ export function RunningInstances() {
             {runningDetails.map((inst) => (
               <div
                 key={inst.id}
-                className="flex items-center gap-2 px-3 py-2 hover:bg-white/5 transition-colors"
+                className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-white/5"
               >
                 {inst.icon && (
                   <img
@@ -114,18 +113,15 @@ export function RunningInstances() {
                     className="size-6 rounded object-cover shrink-0"
                   />
                 )}
-                <button
-                  onClick={() => handleNavigate(inst.id)}
-                  className="flex-1 text-sm text-left truncate hover:text-accent transition-colors cursor-pointer"
-                >
+                <span className="flex-1 truncate break-words text-sm text-left">
                   {displayName(inst)}
-                </button>
+                </span>
                 <Button
                   variant="ghost"
                   isIconOnly
                   onPress={() => handleStop(inst.id)}
                   className="size-6 rounded shrink-0 text-danger-soft-foreground hover:bg-danger-soft-hover"
-                  aria-label={`Stop ${displayName(inst)}`}
+                  aria-label={`Detener ${displayName(inst)}`}
                 >
                   <IconPlayerStop size={12} />
                 </Button>

@@ -4,6 +4,7 @@ import Ms from "../components/icons/Ms";
 import UserHead from "../components/icons/UserHead";
 import defaultBackground from "../assets/modstack-default.jpg";
 
+// NOTE: mirrors globals.css design tokens (--foreground, --muted).
 const C = {
   fg: "#eeeef0",
   fgMuted: "#9a9aab",
@@ -215,6 +216,8 @@ export default function Login() {
                 fontSize: 12.5,
                 lineHeight: 1.5,
                 textAlign: "left",
+                overflowWrap: "break-word",
+                wordBreak: "break-word",
               }}
             >
               {error}

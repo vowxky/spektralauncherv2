@@ -103,6 +103,10 @@ pub enum MinecraftAuthorizationError {
     /// Claims were missing from the response
     #[error("missing claims from response")]
     MissingClaims,
+
+    /// Xbox error with raw XErr/redirect (preserva detalles del servidor Xbox)
+    #[error("xbox error {x_err}: {message} (redirect: {redirect})")]
+    XboxError { x_err: i64, message: String, redirect: String },
 }
 
 /// The response from Minecraft when attempting to authenticate with an xbox
@@ -216,17 +220,21 @@ impl MinecraftAuthorizationFlow {
             .send()
             .await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let xbox_security_token_err_resp_res = response.json().await;
-            if xbox_security_token_err_resp_res.is_err() {
-                return Err(MinecraftAuthorizationError::MissingClaims);
+            let xbox_security_token_err_resp_res = response.json::<XboxLiveAuthenticationResponseError>().await;
+            if let Ok(err) = xbox_security_token_err_resp_res {
+                match err.x_err {
+                    2148916238 => return Err(MinecraftAuthorizationError::AddToFamily),
+                    2148916233 => return Err(MinecraftAuthorizationError::NoXbox),
+                    _ => {
+                        return Err(MinecraftAuthorizationError::XboxError {
+                            x_err: err.x_err,
+                            message: err.message,
+                            redirect: err.redirect,
+                        })
+                    }
+                }
             }
-            let xbox_security_token_err_resp: XboxLiveAuthenticationResponseError =
-                xbox_security_token_err_resp_res.expect("This should succeed always");
-            match xbox_security_token_err_resp.x_err {
-                2148916238 => Err(MinecraftAuthorizationError::AddToFamily),
-                2148916233 => Err(MinecraftAuthorizationError::NoXbox),
-                _ => Err(MinecraftAuthorizationError::MissingClaims),
-            }
+            return Err(MinecraftAuthorizationError::MissingClaims);
         } else {
             response.error_for_status_ref()?;
             let xbox_security_token_resp: XboxLiveAuthenticationResponse = response.json().await?;

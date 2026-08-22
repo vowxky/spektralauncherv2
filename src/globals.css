@@ -3,7 +3,7 @@
 
 @font-face {
   font-family: "Minecraftia";
-  src: url("/src/fonts/Minecraftia-Regular.ttf") format("truetype");
+  src: url("./fonts/Minecraftia-Regular.ttf") format("truetype");
   font-weight: normal;
   font-style: normal;
 }
@@ -300,6 +300,20 @@ body {
   -webkit-user-drag: none;
   -webkit-user-select: none;
   scrollbar-color: var(--scrollbar) var(--background);
+}
+
+/* Log viewers must stay selectable for copy/paste even with the global no-select. */
+.log-selectable,
+.log-selectable * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
+}
+
+/* Utility: force wrapping of long unbroken tokens (paths, URLs, hashes). */
+.log-token-break {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 *[data-tauri-drag-region] {

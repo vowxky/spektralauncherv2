@@ -2,26 +2,48 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<title>Spektra Auth Success</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spektra</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap');
   body {
-    font-family: Helvetica, Arial, sans-serif;
+    font-family: 'Inter', Helvetica, Arial, sans-serif;
     display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; background: #121212; color: #fff;
+    min-height: 100vh; background: #07070a; color: #eeeef0;
+    overflow: hidden; position: relative;
   }
-
+  /* Fondo idéntico al Login: imagen + gradients */
+  .bg-img {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; opacity: 0.55; filter: saturate(0.9) brightness(0.7);
+  }
+  .bg-gradient {
+    position: fixed; inset: 0;
+    background: linear-gradient(180deg, rgba(7,7,10,0.66) 0%, rgba(7,7,10,0.30) 45%, rgba(7,7,10,0.92) 100%);
+  }
+  .bg-radial {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse 64% 58% at 50% 50%, transparent 0%, rgba(7,7,10,0.5) 100%);
+  }
+  .glow-a {
+    position: fixed; top: -16%; left: 4%; width: 460px; height: 460px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,164,239,0.14) 0%, transparent 62%);
+    filter: blur(26px); animation: login-glow 9s ease-in-out infinite;
+  }
+  .glow-b {
+    position: fixed; bottom: -18%; right: 2%; width: 500px; height: 500px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(242,80,34,0.10) 0%, transparent 62%);
+    filter: blur(26px); animation: login-glow 11s ease-in-out -3s infinite;
+  }
+  @keyframes login-glow { 0%,100%{opacity:1} 50%{opacity:0.7} }
   @keyframes kaboom {
     0%   { transform: scale(0) rotate(-20deg); opacity: 0; }
     60%  { transform: scale(1.25) rotate(8deg); }
     80%  { transform: scale(0.92) rotate(-4deg); }
     100% { transform: scale(1) rotate(0deg); opacity: 1; }
   }
-  @keyframes floatUp {
-    0%   { transform: translateY(0) rotate(0deg); opacity: 1; }
-    100% { transform: translateY(-420px) rotate(720deg); opacity: 0; }
-  }
+
   @keyframes fadeSlide {
     from { opacity: 0; transform: translateY(16px); }
     to   { opacity: 1; transform: translateY(0); }
@@ -34,123 +56,81 @@
     0%, 100% { transform: rotate(-6deg); }
     50%       { transform: rotate(6deg); }
   }
+  @keyframes login-rise { from{opacity:0; transform:translateY(10px)} to{opacity:1; transform:translateY(0)} }
 
-  .ext-wrap {
-    display: flex; flex-direction: column; align-items: center;
-    justify-content: center; min-height: 340px;
-    padding: 2.5rem 1rem 2rem; overflow: hidden; position: relative;
+  .card-wrap { position: relative; z-index: 1; animation: login-rise 380ms ease-out; }
+  .card {
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    width: 380px; padding: 40px 36px 32px; border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: linear-gradient(180deg, rgba(30,30,40,0.94) 0%, rgba(15,15,20,0.97) 55%, rgba(9,9,12,0.99) 100%);
+    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 40px 90px -30px rgba(0,0,0,0.98), 0 12px 32px -14px rgba(0,0,0,0.85), inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -40px 60px -40px rgba(0,0,0,0.7);
+    text-align: center;
   }
 
-  .confetti-layer { 
-    position: fixed; 
-    inset: 0; 
-    pointer-events: none; 
-    z-index: 999;
-  }
-
-  .bit {
-    position: absolute; width: 10px; height: 10px;
-    border-radius: 2px; animation: floatUp linear both;
-  }
 
   .icon-stack {
-    position: relative; width: 96px; height: 96px; margin-bottom: 1.5rem;
+    position: relative; width: 80px; height: 80px; margin-bottom: 2px;
     animation: kaboom 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
   }
-
   .pulse {
     position: absolute; inset: 0; border-radius: 50%;
     background: #1D9E75; animation: pulse-ring 1.1s ease-out 0.5s infinite;
   }
   .pulse2 { animation-delay: 0.8s; }
-
   .icon-circle {
     position: absolute; inset: 0; border-radius: 50%;
-    background: #1D9E75; display: flex;
+    background: linear-gradient(180deg, #1D9E75 0%, #15946c 100%); display: flex;
     align-items: center; justify-content: center;
+    box-shadow: 0 8px 24px rgba(29,158,117,0.45), inset 0 1px 0 rgba(255,255,255,0.2);
   }
+  .icon-circle svg { width: 36px; height: 36px; animation: wiggle 0.4s ease-in-out 0.7s 2; }
 
-  .icon-circle svg {
-    width: 44px; height: 44px;
-    animation: wiggle 0.4s ease-in-out 0.7s 2;
+  .title {
+    font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: #eeeef0;
+    animation: fadeSlide 0.4s 0.35s ease both;
   }
-
-  .big-title {
-    font-size: 28px; font-weight: 500; color: #fff;
-    margin: 0 0 0.4rem;
-    animation: fadeSlide 0.4s 0.35s ease both; text-align: center;
-  }
-
   .sub {
-    font-size: 15px; color: #aaa; margin: 0;
+    font-size: 13px; color: #9a9aab; line-height: 1.5;
     animation: fadeSlide 0.4s 0.5s ease both;
   }
-
   .tag {
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 14px; border-radius: 999px; font-size: 13px;
-    font-weight: 500; border: 0.5px solid #444;
-    background: #1e1e1e; color: #fff;
-    animation: fadeSlide 0.4s 0.65s ease both;
-    margin-top: 1.5rem;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(255,255,255,0.06); color: #eeeef0;
+    animation: fadeSlide 0.4s 0.65s ease both; margin-top: 4px;
+  }
+  .hint {
+    font-size: 11px; color: #6a6a7a; margin-top: 2px;
+    animation: fadeSlide 0.4s 0.75s ease both;
   }
 </style>
 </head>
 <body>
+  <!-- Fondo estilo launcher -->
+  <div class="glow-a"></div>
+  <div class="glow-b"></div>
+  <div class="bg-gradient"></div>
+  <div class="bg-radial"></div>
 
-<div class="ext-wrap">
-  <div class="confetti-layer" id="confetti"></div>
-
-  <div class="icon-stack">
-    <div class="pulse"></div>
-    <div class="pulse pulse2"></div>
-    <div class="icon-circle">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5"
-           stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="20 6 9 17 4 12"/>
-      </svg>
+  <div class="card-wrap">
+    <div class="card" style="padding: 44px 36px; gap: 0;">
+      <div class="icon-stack" style="margin: 0;">
+        <div class="pulse"></div>
+        <div class="pulse pulse2"></div>
+        <div class="icon-circle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </div>
+      </div>
     </div>
   </div>
 
-  <p class="big-title">Authentication complete</p>
-  <p class="sub">You can close this window</p>
-
-  <span class="tag">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#26215C"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-      <circle cx="9" cy="7" r="4"/>
-      <polyline points="16 11 18 13 22 9"/>
-    </svg>
-    Identity verified
-  </span>
-</div>
-
 <script>
-  setTimeout(() => window.close(), 3000);
-
-  (function() {
-    const colors = ['#7F77DD','#1D9E75','#D85A30','#D4537E','#EF9F27','#378ADD','#639922'];
-    const layer = document.getElementById('confetti');
-    for (let i = 0; i < 38; i++) {
-      const b = document.createElement('div');
-      b.className = 'bit';
-      const size = 7 + Math.random() * 10;
-      b.style.cssText = [
-        `left:${10 + Math.random() * 80}%`,
-        `bottom:${-50 + Math.random() * 50}px`,
-        `width:${size}px`,
-        `height:${size}px`,
-        `background:${colors[Math.floor(Math.random() * colors.length)]}`,
-        `border-radius:${Math.random() > 0.5 ? '50%' : '2px'}`,
-        `animation-duration:${1.2 + Math.random() * 1.6}s`,
-        `animation-delay:${0.2 + Math.random() * 0.8}s`,
-        `opacity:0`
-      ].join(';');
-      layer.appendChild(b);
-    }
-  })();
+  setTimeout(() => window.close(), 2200);
 </script>
-
 </body>
 </html>

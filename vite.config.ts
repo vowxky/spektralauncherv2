@@ -16,10 +16,6 @@ export default defineConfig({
       ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
-  define: {
-    "import.meta.env.VITE_API_URL": JSON.stringify(
-      "https://fitzxel-cl-api.vercel.app/v2"
-    ),
-    "import.meta.env.VITE_LAUNCHER_ID": JSON.stringify("spektra"),
-  },
+  // secrets moved to Rust backend — nothing exposed in bundle
+  define: {},
 });

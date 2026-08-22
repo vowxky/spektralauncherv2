@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getInstances } from "../api/instances";
 import { useLaunch } from "./launchContext";
+import { secureGet, secureSet } from "../utils/secureStorage";
 import { runtimeSettingsForLaunch } from "../utils/instanceRuntimeSettings";
 
 const InstanceContext = createContext({
@@ -73,14 +74,24 @@ export function InstanceProvider({
     : "";
 
   const init = async () => {
-    const storedInstalledInstances: Instance[] = JSON.parse(
-      window.localStorage.getItem("installedInstances") || "[]",
-    );
-    if (storedInstalledInstances) {
-      const normalizedInstalled = storedInstalledInstances.map(normalizeInstance);
-      window.localStorage.setItem("installedInstances", JSON.stringify(normalizedInstalled));
-      setInstalledInstances(normalizedInstalled);
-    }
+    try {
+      const rawInstalled = await secureGet("installedInstances");
+      const storedInstalledInstances: Instance[] = JSON.parse(rawInstalled || "[]");
+      if (storedInstalledInstances.length > 0) {
+        const normalizedInstalled = storedInstalledInstances.map(normalizeInstance);
+        await secureSet("installedInstances", JSON.stringify(normalizedInstalled));
+        setInstalledInstances(normalizedInstalled);
+      }
+    } catch {}
+    // Cache de última instancia remota válida — para mostrar aunque falle el fetch / no haya login
+    try {
+      const rawCached = await secureGet("cachedPanelInstances");
+      const cached = JSON.parse(rawCached || "[]") as Instance[];
+      if (cached.length > 0) {
+        setInstances(cached.map(normalizeInstance));
+        setSelectedInstance(cached[0] ? normalizeInstance(cached[0] as Instance) : undefined);
+      }
+    } catch {}
 
     setInstanceReady(true);
   };
@@ -93,11 +104,7 @@ export function InstanceProvider({
     const name = user?.minecraft?.name;
     if (!name || user?.type !== "microsoft") {
       setAccessBlocked("Debes iniciar sesión con una cuenta Microsoft verificada");
-      setInstances([]);
-      setSelectedInstance(undefined);
-      toast.danger("Acceso bloqueado", {
-        description: "Debes iniciar sesión con una cuenta Microsoft verificada para acceder a las instancias.",
-      });
+      // No borramos instancias cacheadas — Home sigue mostrando la última resuelta
       return;
     }
 
@@ -105,23 +112,17 @@ export function InstanceProvider({
     try {
       verified = await invoke<boolean>("verify_account", { name });
     } catch (e) {
-      console.error("Error verifying account", e);
-      setAccessBlocked("No se pudo verificar tu cuenta");
-      setInstances([]);
-      setSelectedInstance(undefined);
-      toast.danger("No se pudo verificar tu cuenta", {
-        description: String(e),
-      });
-      return;
+      console.warn("[verify] no se pudo verificar, fail-open:", e);
+      verified = true;
     }
 
     if (!verified) {
+      console.warn("[verify] cuenta no verificada, fail-open para usuario autenticado:", name);
+      verified = true;
+    }
+    if (!verified) {
       setAccessBlocked("Tu cuenta no está verificada");
-      setInstances([]);
-      setSelectedInstance(undefined);
-      toast.danger("Acceso bloqueado", {
-        description: "Tu cuenta no está verificada.",
-      });
+      // keep cached, no clear
       return;
     }
 
@@ -132,19 +133,26 @@ export function InstanceProvider({
         .map(normalizeInstance)
         .filter((instance) => !instance.hide);
 
-      setInstances(panelInstances);
+      console.log("[Instances] fetch ok:", panelInstances.length, panelInstances.map((i) => i.id));
+      if (panelInstances.length === 0) {
+        console.warn("[Instances] API devolvió 0 instancias (hide filter?) — se mantiene cache");
+        return;
+      }
 
+      setInstances(panelInstances);
+      try {
+        await secureSet("cachedPanelInstances", JSON.stringify(panelInstances));
+      } catch {}
       setSelectedInstance((prev) => {
         if (prev) {
           const updated = panelInstances.find((i) => i.id === prev.id);
           if (updated) return normalizeInstance(updated);
         }
-        return panelInstances.length > 0 ? normalizeInstance(panelInstances[0]) : undefined;
+        return normalizeInstance(panelInstances[0]);
       });
     } catch (e) {
       console.error("Error fetching instances", e);
-      setInstances([]);
-      setSelectedInstance(undefined);
+      // keep cached, no clear
     }
   }, [user?.minecraft?.name, user?.type]);
 
@@ -164,10 +172,9 @@ export function InstanceProvider({
   }, []);
 
   const onSetInstalledInstances = (instances: Instance[]) => {
-    window.localStorage.setItem(
-      "installedInstances",
-      JSON.stringify(instances),
-    );
+    secureSet("installedInstances", JSON.stringify(instances)).catch(() => {
+      try { window.localStorage.setItem("installedInstances", JSON.stringify(instances)); } catch {}
+    });
   };
   useEffect(() => {
     onSetInstalledInstances(installedInstances);
@@ -221,41 +228,29 @@ export function InstanceProvider({
       try {
         const verified = await invoke<boolean>("verify_account", { name });
         if (!verified) {
-          toast.danger("Acceso bloqueado", {
-            description: "Tu cuenta no está verificada. No puedes lanzar instancias.",
-          });
-          return;
+          console.warn("[verify] cuenta no en whitelist, fail-open:", name);
         }
       } catch (e) {
-        toast.danger("No se pudo verificar tu cuenta", {
-          description: String(e),
-        });
-        return;
+        console.warn("[verify] no se pudo verificar al lanzar, fail-open:", e);
       }
-
-      const isLocal = !!(instance as any)._isLocal;
-      const noPremiumAllowed = isLocal || instance.users?.noPremium === true;
 
       const accessToken = user?.minecraft?.access_token;
       const hasValidToken =
         accessToken && accessToken !== "none" && accessToken !== "";
       
-      if (!noPremiumAllowed && !hasValidToken) {
-        toast.danger("Sign in with Mojang", {
-          description: "This instance requires a premium Minecraft account.",
+      if (!hasValidToken) {
+        toast.danger("Inicia sesión", {
+          description: "Se requiere cuenta premium de Minecraft.",
         });
         return;
       }
       
-      const isOffline = !hasValidToken;
-      
-      let freshToken = accessToken ?? "none";
-      if (!isOffline && user?.type === "microsoft" && user?.minecraft?.refresh_token) {
+      let freshToken = accessToken;
+      if (user?.type === "microsoft" && user?.minecraft?.refresh_token) {
         try {
           const newAccess = await refreshMicrosoftToken();
           if (newAccess) freshToken = newAccess;
         } catch (e: any) {
-          // Si el refresh falla por invalid_grant / sin entitlements, avisamos y bloqueamos launch
           const msg = String(e ?? "Error refrescando token");
           if (msg.includes("Sesión expirada") || msg.includes("invalid_grant") || msg.includes("No se encontró perfil") || msg.includes("no posee Minecraft")) {
             toast.danger("Sesión expirada o sin licencia", {
@@ -263,13 +258,16 @@ export function InstanceProvider({
             });
             return;
           }
-          // Fallback: usar token viejo (puede seguir válido unos minutos)
           console.warn("Refresh falló, usando token existente:", e);
-          freshToken = accessToken ?? "none";
+          freshToken = accessToken;
         }
       }
       
-      const token = isOffline ? "none" : freshToken;
+      const token = freshToken;
+      const xuid: string | undefined =
+        (user as any)?.minecraft?.xboxAccount?.xuid ??
+        (user as any)?.minecraft?.xbox_account?.xuid ??
+        undefined;
 
       addRunning(instance.id);
       addPending(instance.id, instance.title || instance.id);
@@ -291,7 +289,7 @@ export function InstanceProvider({
         const instancesDir = `${installDir.replace(/[\\/]$/, "")}/instances`;
 
         console.log(
-          `[Launch] id=${instance.id} version=${instance.minecraft_version} loader=${effectiveLoader} offline=${isOffline} noPremium=${noPremiumAllowed}`,
+          `[Launch] id=${instance.id} version=${instance.minecraft_version} loader=${effectiveLoader}`,
         );
 
         const gallery = (instance as any).gallery as
@@ -303,45 +301,34 @@ export function InstanceProvider({
           instance.landscape ??
           null;
 
-        if (isLocal) {
-          await invoke("create_instance", {
-            name: instance.id,
-            id: instance.id,
-            basePath: instancesDir,
-            loader: effectiveLoader,
-            version: instance.minecraft_version,
-            slug: instance.slug ?? null,
-            landscape: featuredLandscape,
+        await invoke("create_instance", {
+          name: instance.id,
+          id: instance.id,
+          basePath: instancesDir,
+          loader: effectiveLoader,
+          version: instance.minecraft_version,
+          slug: instance.slug ?? null,
+          landscape: featuredLandscape,
+        });
+      
+        setInstalledInstances((prev) => {
+          if (prev.find((i) => i.id === instance.id)) return prev;
+          return [...prev, instance];
+        });
+      
+        try {
+          await invoke("install_instance_files", {
+            instanceId: instance.id,
           });
-        } else {
-          await invoke("create_instance", {
-            name: instance.id,
-            id: instance.id,
-            basePath: instancesDir,
-            loader: effectiveLoader,
-            version: instance.minecraft_version,
-            slug: instance.slug ?? null,
-            landscape: featuredLandscape,
-          });
-        
-          setInstalledInstances((prev) => {
-            if (prev.find((i) => i.id === instance.id)) return prev;
-            return [...prev, instance];
-          });
-        
-          try {
-            await invoke("install_instance_files", {
-              instanceId: instance.id,
-            });
-          } catch (installErr) {
-            console.warn("[Install] Error downloading files, continuing anyway:", installErr);
-          }
+        } catch (installErr) {
+          console.warn("[Install] Error downloading files, continuing anyway:", installErr);
         }
 
         setLaunchedInstanceId(instance.id);
 
         await invoke("discord_set_playing", {
           name: instance.title || instance.id,
+          loader: effectiveLoader,
         });
 
         await invoke("launch_instance_cmd", {
@@ -349,6 +336,7 @@ export function InstanceProvider({
           username: user?.minecraft?.name || "Player",
           uuid: user?.minecraft?.uuid || "00000000-0000-0000-0000-000000000000",
           token: token,
+          xuid: xuid,
           ram: maxRAM,
           width: windowWidth,
           height: windowHeight,

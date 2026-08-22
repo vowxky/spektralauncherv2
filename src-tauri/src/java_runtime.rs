@@ -12,10 +12,7 @@ use std::os::windows::process::CommandExt;
 macro_rules! jlog {
     ($app:expr, $log_id:expr, $version:expr, $($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        $app.emit("java-log", serde_json::json!({
-            "version": $version,
-            "message": msg
-        })).ok();
+        $crate::logger::emit_java_log($app, $version, &msg);
     }};
 }
 

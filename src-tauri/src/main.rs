@@ -12,10 +12,31 @@ use commands::auth::*;
 use commands::config::*;
 use commands::instance::*;
 use commands::java::*;
+use commands::secure_store::*;
 use utils::*;
 
 use tauri::Listener;
 use tauri::Manager;
+
+#[tauri::command]
+fn open_logs_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("logs") {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        win.unminimize().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let _win = tauri::WebviewWindowBuilder::new(&app, "logs", tauri::WebviewUrl::App("index.html".into()))
+        .title("Logs — Spektra")
+        .inner_size(900.0, 650.0)
+        .min_inner_size(600.0, 400.0)
+        .center()
+        .resizable(true)
+        .decorations(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 fn disable_tracking_prevention(webview: &tauri::WebviewWindow) {
@@ -103,7 +124,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Warn)
+                .level(log::LevelFilter::Info)
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
@@ -149,11 +170,21 @@ fn main() {
             get_system_ram,
             login_microsoft,
             refresh_microsoft_token,
+            validate_minecraft_token,
             logout,
             save_auth_json,
             get_auth_json,
             clear_auth,
+            secure_set,
+            secure_get,
+            secure_remove,
             discord_set_idle,
+            discord_set_home,
+            discord_set_login,
+            discord_set_settings,
+            discord_set_browsing,
+            discord_set_downloading,
+            discord_set_installing,
             discord_set_playing,
             get_install_dir,
             pick_install_dir,
@@ -165,6 +196,10 @@ fn main() {
             stop_instance,
             get_running_instances,
             get_downloading_instances,
+            get_log_path,
+            clear_instance_logs,
+            get_instance_logs_tail,
+            open_logs_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri");

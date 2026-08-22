@@ -59,7 +59,14 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
       })
       pendingUpdate.current = update
       setStatus('downloaded')
-    } catch (err) {
+    } catch (err: any) {
+      const msg = String(err?.message ?? err ?? '')
+      // En Linux dev no hay artefacto para linux-x86_64, solo windows — no es error real
+      if (msg.includes('None of the fallback platforms') || msg.includes('platforms')) {
+        console.warn('[updater] plataforma sin artefacto (ignorado en dev):', msg)
+        setStatus('idle')
+        return
+      }
       console.error('[updater]', err)
       setStatus('idle')
     }

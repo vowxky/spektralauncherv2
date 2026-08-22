@@ -16,6 +16,14 @@ use std::os::unix::fs::OpenOptionsExt;
 const CLIENT_ID: &str = "28345b95-0610-4565-b77d-03a20a541560";
 const REDIRECT_URI: &str = "http://localhost:7878/callback";
 
+fn http_client() -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
 #[command]
 pub async fn login_microsoft() -> Result<Value, String> {
     let listener = TcpListener::bind("127.0.0.1:7878")
@@ -104,25 +112,42 @@ pub async fn login_microsoft() -> Result<Value, String> {
     .map_err(|_| "OAuth login timed out after 3 minutes. Please try again.".to_string())??;
 
     // listener se libera automáticamente aquí (drop al salir del scope del timeout)
+    drop(listener);
 
-    let (ms_access_token, ms_refresh_token) =
+    let (ms_access_token, ms_refresh_token, ms_expires_in) =
         exchange_code(&code, pkce_verifier.secret())
             .await
             .map_err(|e| format!("Error exchanging code: {}", e))?;
 
-    let mc_flow = MinecraftAuthorizationFlow::new(reqwest::Client::new());
+    let mc_flow = MinecraftAuthorizationFlow::new(http_client());
     let mc_token = mc_flow
         .exchange_microsoft_token(&ms_access_token)
         .await
         .map_err(|e| map_minecraft_auth_error(e))?;
 
     // Perfil de Minecraft — aquí falla el "no encuentra su perfil"
+    // Esta llamada verifica que el token es válido contra api.minecraftservices.com
+    // (equivalente a la verificación que hace el juego contra sessionserver.mojang.com)
     let profile = get_minecraft_profile(mc_token.access_token().as_ref()).await.map_err(|e| e)?;
     if let Err(e) = check_minecraft_entitlements(mc_token.access_token().as_ref()).await {
         eprintln!("[auth] advertencia entitlements: {}", e);
     }
     let profile_name = profile["name"].as_str().unwrap().to_string();
     let profile_id = profile["id"].as_str().unwrap().to_string();
+    let mc_expires_in = mc_token.expires_in() as u64;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    // XUID para que el juego use user_type=msa y obtenga la clave pública de chat
+    // (fix "CHAT DISABLED DUE TO MISSING PROFILE PUBLIC KEY")
+    let xuid: Option<String> = match get_xbox_xuid(&ms_access_token).await {
+        Ok(x) => Some(x),
+        Err(e) => {
+            eprintln!("[auth] no se pudo obtener XUID (chat puede fallar, se usa fallback): {}", e);
+            None
+        }
+    };
 
     Ok(json!({
         "type": "microsoft",
@@ -131,7 +156,13 @@ pub async fn login_microsoft() -> Result<Value, String> {
             "uuid": profile_id,
             "access_token": mc_token.access_token().as_ref(),
             "refresh_token": ms_refresh_token,
-            "ms_access_token": ms_access_token
+            "ms_access_token": ms_access_token,
+            "expires_at": now_ms + mc_expires_in * 1000,
+            "expires_in": mc_expires_in,
+            "ms_expires_at": now_ms + ms_expires_in * 1000,
+            "ms_expires_in": ms_expires_in,
+            "xboxAccount": xuid.as_ref().map(|x| json!({ "xuid": x })).unwrap_or(Value::Null),
+            "xbox_account": xuid.as_ref().map(|x| json!({ "xuid": x })).unwrap_or(Value::Null)
         }
     }))
 }
@@ -144,25 +175,113 @@ fn auth_store_path() -> PathBuf {
     path
 }
 
+fn keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("Spektra", "auth").map_err(|e| e.to_string())
+}
+
+fn save_to_keyring(payload: &str) -> Result<(), String> {
+    let entry = keyring_entry()?;
+    entry.set_password(payload).map_err(|e| e.to_string())
+}
+
+fn get_from_keyring() -> Option<String> {
+    let entry = keyring_entry().ok()?;
+    match entry.get_password() {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+fn clear_keyring() {
+    if let Ok(entry) = keyring_entry() {
+        let _ = entry.delete_credential();
+    }
+}
+
+fn save_to_file(payload: &str) -> Result<(), String> {
+    let path = auth_store_path();
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut file = opts.open(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(payload.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 #[command]
 pub fn save_auth_json(payload: String) -> Result<(), String> {
-    let path = auth_store_path();
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    opts.mode(0o600);
-    let mut file = opts.open(&path).map_err(|e| e.to_string())?;
-    file.write_all(payload.as_bytes())
-        .map_err(|e| e.to_string())
+    // Validar que sea JSON válido antes de tocar disco/keychain
+    serde_json::from_str::<Value>(&payload).map_err(|e| format!("payload no es JSON válido: {}", e))?;
+    // 1) Intento keychain OS (sin prompt, atado al login del usuario)
+    //    Si funciona, es la fuente de verdad y borramos el archivo plano para no dejar tokens en texto
+    match save_to_keyring(&payload) {
+        Ok(()) => {
+            // Migración: eliminar archivo plano si existe (no falla si no existe)
+            let path = auth_store_path();
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("[auth] keychain no disponible, fallback a archivo: {}", e);
+        }
+    }
+    // 2) Fallback a archivo (compatibilidad / entornos sin keychain)
+    save_to_file(&payload)
 }
 
 #[command]
 pub fn get_auth_json() -> Option<String> {
-    std::fs::read_to_string(auth_store_path()).ok()
+    // 1) Keychain primero — fuente de verdad segura
+    if let Some(v) = get_from_keyring() {
+        return Some(v);
+    }
+    // 2) Fallback archivo
+    let path = auth_store_path();
+    let file_content = match std::fs::read_to_string(&path) {
+        Ok(v) if !v.trim().is_empty() && serde_json::from_str::<Value>(&v).is_ok() => v,
+        _ => return None,
+    };
+    // En dev no forzamos re-login para no molestar (mantiene compatibilidad)
+    if cfg!(debug_assertions) {
+        eprintln!("[auth] dev mode: sesión legacy encontrada, usando archivo sin forzar re-login");
+        return Some(file_content);
+    }
+    // Intentar migrar a keychain para saber si el backend está disponible.
+    // En entornos sin Secret Service / keychain, esto falla y hacemos fallback silencioso
+    // sin forzar re-login (evita loop infinito).
+    // En producción con keychain OK, forzamos un re-login ÚNICO para que los tokens
+    // se regeneren ya cifrados y con la nueva estructura expires_at.
+    match save_to_keyring(&file_content) {
+        Ok(()) => {
+            eprintln!("[auth] sesión legacy detectada — forzando re-login único para migrar a keychain");
+            let _ = std::fs::remove_file(&path);
+            clear_keyring(); // borra la copia migrada para exigir login fresco
+            None // fuerza Login en el frontend
+        }
+        Err(e) => {
+            eprintln!("[auth] keychain no disponible ({}), usando archivo como fallback sin forzar", e);
+            Some(file_content)
+        }
+    }
 }
 
 #[command]
 pub fn clear_auth() -> Result<(), String> {
+    clear_keyring();
     let path = auth_store_path();
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -171,8 +290,18 @@ pub fn clear_auth() -> Result<(), String> {
 }
 
 #[command]
-pub async fn refresh_microsoft_token(refresh_token: String) -> Result<Value, String> {
-    let client = Client::new();
+#[allow(non_snake_case)]
+pub async fn refresh_microsoft_token(
+    refreshToken: Option<String>,
+    refresh_token: Option<String>,
+) -> Result<Value, String> {
+    let refresh_token = refreshToken
+        .or(refresh_token)
+        .ok_or_else(|| "Missing refreshToken/refresh_token".to_string())?;
+    if refresh_token.trim().is_empty() || refresh_token.len() < 10 {
+        return Err("refresh_token vacío o inválido — vuelve a iniciar sesión".to_string());
+    }
+    let client = http_client();
 
     let params = [
         ("client_id", CLIENT_ID),
@@ -186,41 +315,58 @@ pub async fn refresh_microsoft_token(refresh_token: String) -> Result<Value, Str
         .form(&params)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error de red en refresh: {}", e))?;
 
-    let json: Value = res.json().await.map_err(|e| e.to_string())?;
+    // Si el endpoint devuelve HTML (p.ej. 500) el .json() fallaría con mensaje críptico
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    let json: Value = serde_json::from_str(&text).map_err(|_| {
+        format!("Respuesta no-JSON del servidor Microsoft ({}): {}", status, &text[..text.len().min(300)])
+    })?;
 
     if let Some(err) = json.get("error") {
+        let err_str = err.as_str().unwrap_or("");
         let desc = json
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        // invalid_grant = refresh expirado o revocado -> necesita login de nuevo
-        if err.as_str() == Some("invalid_grant") {
+        // Errores que requieren re-login según doc MS: invalid_grant, interaction_required, login_required, consent_required
+        let needs_relogin = matches!(
+            err_str,
+            "invalid_grant" | "interaction_required" | "login_required" | "consent_required" | "invalid_request"
+        );
+        if needs_relogin {
             return Err(
-                "Sesión expirada: vuelve a iniciar sesión con Microsoft (refresh_token inválido)".to_string(),
+                "Sesión expirada: vuelve a iniciar sesión con Microsoft (refresh_token inválido o revocado)".to_string(),
             );
         }
-        return Err(format!("Error refresh: {} — {}", err, desc));
+        return Err(format!("Error refresh ({}): {} — {}", status, err_str, desc));
+    }
+
+    if !status.is_success() {
+        return Err(format!("Error HTTP en refresh ({}): {}", status, text.chars().take(500).collect::<String>()));
     }
 
     let new_ms_access = json["access_token"]
         .as_str()
         .ok_or("No access_token en refresh")?
         .to_string();
+    let ms_expires_in = json["expires_in"].as_u64().unwrap_or(3600);
     // Microsoft a veces no rota el refresh_token, reusamos el anterior si no viene
     let new_ms_refresh = json["refresh_token"]
         .as_str()
         .map(|s| s.to_string())
         .unwrap_or_else(|| refresh_token.clone());
 
-    let mc_flow = MinecraftAuthorizationFlow::new(reqwest::Client::new());
+    let mc_flow = MinecraftAuthorizationFlow::new(http_client());
     let mc_token = mc_flow
         .exchange_microsoft_token(&new_ms_access)
         .await
         .map_err(|e| map_minecraft_auth_error(e))?;
 
     // Re-validar perfil en refresh — si es 404 (cuenta solo Xbox) no bloqueamos, solo avisamos
+    // Nota: esto verifica que MC pueda validar el token (equiv. a hasJoined/sessionserver)
+    let mc_expires_in = mc_token.expires_in() as u64;
     if let Err(e) = get_minecraft_profile(mc_token.access_token().as_ref()).await {
         if e.contains("404") {
             eprintln!("[auth] refresh sin perfil Minecraft (cuenta solo Xbox), continúa con fallback: {}", e);
@@ -236,12 +382,14 @@ pub async fn refresh_microsoft_token(refresh_token: String) -> Result<Value, Str
     Ok(json!({
         "access_token": mc_token.access_token().as_ref(),
         "refresh_token": new_ms_refresh,
-        "ms_access_token": new_ms_access
+        "ms_access_token": new_ms_access,
+        "expires_in": mc_expires_in,
+        "ms_expires_in": ms_expires_in
     }))
 }
 
-async fn exchange_code(code: &str, code_verifier: &str) -> Result<(String, String), String> {
-    let client = Client::new();
+async fn exchange_code(code: &str, code_verifier: &str) -> Result<(String, String, u64), String> {
+    let client = http_client();
 
     let params = [
         ("client_id", CLIENT_ID),
@@ -256,16 +404,24 @@ async fn exchange_code(code: &str, code_verifier: &str) -> Result<(String, Strin
         .form(&params)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error de red en exchange_code: {}", e))?;
 
-    let json: Value = res.json().await.map_err(|e| e.to_string())?;
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    let json: Value = serde_json::from_str(&text).map_err(|_| {
+        format!("Respuesta no-JSON en exchange_code ({}): {}", status, &text[..text.len().min(300)])
+    })?;
 
     if let Some(err) = json.get("error") {
         return Err(format!(
-            "MS token error: {} — {}",
+            "MS token error ({}): {} — {}",
+            status,
             err,
             json.get("error_description").unwrap_or(&Value::Null)
         ));
+    }
+    if !status.is_success() {
+        return Err(format!("Error HTTP en exchange_code ({}): {}", status, text.chars().take(500).collect::<String>()));
     }
 
     let access_token = json["access_token"]
@@ -276,8 +432,9 @@ async fn exchange_code(code: &str, code_verifier: &str) -> Result<(String, Strin
         .as_str()
         .ok_or("No refresh_token en respuesta")?
         .to_string();
+    let expires_in = json["expires_in"].as_u64().unwrap_or(3600);
 
-    Ok((access_token, refresh_token))
+    Ok((access_token, refresh_token, expires_in))
 }
 
 fn map_minecraft_auth_error(e: minecraft_msa_auth::MinecraftAuthorizationError) -> String {
@@ -286,19 +443,20 @@ fn map_minecraft_auth_error(e: minecraft_msa_auth::MinecraftAuthorizationError) 
         NoXbox => "Tu cuenta Microsoft no tiene perfil de Xbox. Créalo gratis en https://www.xbox.com y vuelve a intentar.".to_string(),
         AddToFamily => "Tu cuenta es de menor y debe ser añadida a una familia Microsoft (https://family.microsoft.com).".to_string(),
         MissingClaims => format!("Error de autenticación Xbox (MissingClaims): {}", e),
+        XboxError { x_err, message, redirect } => format!("Error Xbox ({}): {} — {}", x_err, message, redirect),
         Reqwest(err) => format!("Error de red autenticando con Xbox/Minecraft: {}", err),
     }
 }
 
 async fn get_minecraft_profile(access_token: &str) -> Result<Value, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
 
     let response = client
         .get("https://api.minecraftservices.com/minecraft/profile")
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error de red al validar perfil Minecraft: {}", e))?;
 
     if response.status() == 404 {
         return Err(
@@ -331,7 +489,7 @@ async fn get_minecraft_profile(access_token: &str) -> Result<Value, String> {
 }
 
 async fn check_minecraft_entitlements(access_token: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .get("https://api.minecraftservices.com/entitlements/mcstore")
         .bearer_auth(access_token)
@@ -373,8 +531,40 @@ fn offline_uuid(username: &str) -> String {
     )
 }
 
+async fn get_xbox_xuid(ms_access_token: &str) -> Result<String, String> {
+    let client = http_client();
+    let xbl_resp = client
+        .post("https://user.auth.xboxlive.com/user/authenticate")
+        .json(&json!({
+            "Properties": {
+                "AuthMethod": "RPS",
+                "SiteName": "user.auth.xboxlive.com",
+                "RpsTicket": format!("d={}", ms_access_token)
+            },
+            "RelyingParty": "http://auth.xboxlive.com",
+            "TokenType": "JWT"
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !xbl_resp.status().is_success() {
+        return Err(format!("XBL auth falló: {}", xbl_resp.status()));
+    }
+    let xbl_json: Value = xbl_resp.json().await.map_err(|e| e.to_string())?;
+    let xuid = xbl_json
+        .get("DisplayClaims")
+        .and_then(|v| v.get("xui"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|o| o.get("uhs"))
+        .and_then(|v| v.as_str())
+        .ok_or("XBL sin uhs/xuid")?
+        .to_string();
+    Ok(xuid)
+}
+
 async fn get_xbox_gamertag(ms_access_token: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     // 1) Xbox Live authenticate para obtener XBL token
     let xbl_resp = client
         .post("https://user.auth.xboxlive.com/user/authenticate")
@@ -440,6 +630,18 @@ async fn get_xbox_gamertag(ms_access_token: &str) -> Result<String, String> {
 }
 
 #[command]
-pub fn logout() {
-    println!("Sesion cerrada");
+pub fn logout() -> Result<(), String> {
+    // Limpia el archivo de sesión — el frontend también limpia su estado
+    clear_auth()?;
+    println!("Sesión cerrada y archivo auth eliminado");
+    Ok(())
+}
+
+/// Valida que un token de Minecraft siga siendo válido contra el servidor de Mojang
+/// (api.minecraftservices.com). El juego hace la verificación final contra
+/// sessionserver.mojang.com/session/minecraft/join, pero esta llamada es el
+/// equivalente previo que puede hacer el launcher.
+#[command]
+pub async fn validate_minecraft_token(access_token: String) -> Result<Value, String> {
+    get_minecraft_profile(&access_token).await
 }
