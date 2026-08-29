@@ -1,7 +1,7 @@
 {
   "name": "spektra",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.9",
   "type": "module",
   "scripts": {
     "dev": "cross-env NODE_ENV=development vite",
@@ -9,6 +9,9 @@
     "lint": "eslint .",
     "preview": "tsc -b && vite build",
     "tauri": "tauri",
+    "prime": "SPEKTRA_PRIME=1 npm run tauri dev",
+    "prime:full": "GDK_BACKEND=x11 prime-run npm run tauri dev",
+    "dev:prime": "SPEKTRA_PRIME=1 npm run tauri dev",
     "release": "dotenv -- npm run tauri build && node scripts/release.js"
   },
   "dependencies": {

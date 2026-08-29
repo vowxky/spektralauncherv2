@@ -1,6 +1,6 @@
 [package]
 name = "Spektra"
-version = "1.0.8"
+version = "1.0.9"
 description = "Spektra"
 authors = ["primeCigarrete"]
 license = "ARR"
@@ -47,7 +47,7 @@ base64 = "0.22"
 rand = "0.8"
 
 minecraft-msa-auth = { path = "../crates/minecraft-msa-auth" }
-minecraft-java-rs-core = "0.4.1"
+minecraft-java-rs-core = { path = "../crates/minecraft-java-rs-core" }
 tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

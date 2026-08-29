@@ -888,6 +888,18 @@ pub async fn launch_instance_cmd(
         return Err(msg);
     }
 
+    // PRIME offload solo para el proceso de Minecraft (hijo).
+    // Si el launcher se corre con `npm run prime` o con `prime-run`, estas vars se heredan al hijo Java
+    // y MC usa la NVIDIA aunque Tauri siga en Intel/Wayland (evita el crash Wayland 71 de prime-run).
+    let prime_requested = std::env::var("SPEKTRA_PRIME").is_ok()
+        || std::env::var("__NV_PRIME_RENDER_OFFLOAD").is_ok()
+        || std::env::var("PRIME_OFFLOAD").is_ok();
+    if prime_requested {
+        std::env::set_var("__NV_PRIME_RENDER_OFFLOAD", "1");
+        std::env::set_var("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+        std::env::set_var("__VK_LAYER_NV_optimus", "NVIDIA_only");
+        ilog!(&app, &log_id, "PRIME offload activado para Minecraft (NVIDIA)");
+    }
     ilog!(&app, &log_id, "Launching Minecraft...");
     let mut child = match tokio::time::timeout(Duration::from_secs(45), launcher.launch(tx)).await {
         Ok(Ok(c)) => c,
