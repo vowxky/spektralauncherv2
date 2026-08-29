@@ -7,7 +7,38 @@ import "dotenv/config"
 const BRAND = "Spektra"
 const SLUG = "spektra"
 const CDN = "https://cdn.stackedhost.crysistudio.xyz/spektra/release/latest"
-const bundleDir = path.resolve("target/release/bundle/nsis")
+// Con --target x86_64-pc-windows-msvc el bundle va a target/x86_64-pc-windows-msvc/release/...
+// Sin --target va a target/release/... — soportar ambos para CI y local
+function resolveBundleDir() {
+  const candidates = [
+    path.resolve("target/release/bundle/nsis"),
+    path.resolve("target/x86_64-pc-windows-msvc/release/bundle/nsis"),
+    path.resolve("target/x86_64-unknown-linux-gnu/release/bundle"),
+    path.resolve("target/aarch64-apple-darwin/release/bundle"),
+  ]
+  for (const p of candidates) if (fs.existsSync(p)) return p
+  // Fallback: buscar cualquier bundle/nsis bajo target
+  try {
+    const targetDir = path.resolve("target")
+    if (fs.existsSync(targetDir)) {
+      const walk = (dir) => {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, e.name)
+          if (e.isDirectory()) {
+            if (full.endsWith("bundle/nsis") && fs.existsSync(full)) return full
+            const found = walk(full)
+            if (found) return found
+          }
+        }
+        return null
+      }
+      const found = walk(targetDir)
+      if (found) return found
+    }
+  } catch {}
+  return path.resolve("target/release/bundle/nsis")
+}
+const bundleDir = resolveBundleDir()
 const config = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"))
 const version = config.version
 const releaseDate = new Date().toISOString()

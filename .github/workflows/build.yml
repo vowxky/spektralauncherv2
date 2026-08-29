@@ -72,7 +72,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Spektra ${{ github.ref_name }}"
           releaseBody: "See the assets below for download."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
 
@@ -93,16 +93,24 @@ jobs:
           CDN_KEY: ${{ secrets.CDN_SSH_KEY }}
           CDN_PATH: ${{ secrets.CDN_PATH }}
         run: |
+          # Resolver bundle dir con --target
+          BUNDLE_DIR="target/release/bundle/nsis"
+          if [ ! -d "$BUNDLE_DIR" ]; then BUNDLE_DIR="target/x86_64-pc-windows-msvc/release/bundle/nsis"; fi
           if [ -z "$CDN_HOST" ]; then
             echo "CDN secrets no configurados — se deja el artefacto en GitHub Release (draft) y en Actions artifacts."
             echo "Para auto-deploy al CDN, añade en GitHub Secrets: CDN_SSH_HOST, CDN_SSH_USER, CDN_SSH_KEY, CDN_PATH"
-            ls -lh target/release/bundle/nsis/ || true
+            ls -lh "$BUNDLE_DIR"/ || true
+            ls -lh target/*/release/bundle/nsis/ 2>/dev/null || true
             exit 0
           fi
           echo "$CDN_KEY" > /tmp/cdn_key
           chmod 600 /tmp/cdn_key
-          scp -i /tmp/cdn_key -o StrictHostKeyChecking=no target/release/bundle/nsis/spektra-setup.exe target/release/bundle/nsis/update.json "$CDN_USER@$CDN_HOST:$CDN_PATH/"
-          echo "CDN updated"
+          scp -i /tmp/cdn_key -o StrictHostKeyChecking=no "$BUNDLE_DIR/spektra-setup.exe" "$BUNDLE_DIR/update.json" "$CDN_USER@$CDN_HOST:$CDN_PATH/"
+          echo "CDN updated from $BUNDLE_DIR"
+
+      - name: Disable updater for dev builds (no signing key)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.bundle.createUpdaterArtifacts=false;delete j.plugins.updater.pubkey;fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('patched tauri.conf for dev')"
 
       - name: Build Tauri app (dev)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
