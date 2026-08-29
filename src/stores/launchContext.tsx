@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "@heroui/react";
 
 export interface DownloadProgress {
   instanceId: string;
@@ -198,6 +199,27 @@ export function LaunchProvider({ children }: { children: ReactNode }) {
         }
       ),
 
+      listen<{ instanceId: string; message: string }>(
+        "minecraft-error",
+        ({ payload: { instanceId, message } }) => {
+          // Mostrar error en la barra y limpiar bloqueo de 95% — visible siempre
+          update(`${instanceId}:minecraft`, {
+            instanceId,
+            name: instanceId,
+            progress: 0,
+            status: `Error: ${message}`,
+          });
+          try {
+            toast.danger("Error al iniciar Minecraft", { description: message });
+          } catch {}
+          // Autolimpieza tras 6s + quitar de pending/running para no quedar colgado
+          setTimeout(() => update(`${instanceId}:minecraft`, null), 6000);
+          setTimeout(() => update(`${instanceId}:java`, null), 1000);
+          removeRunning(instanceId);
+          removePending(instanceId);
+        }
+      ),
+
       listen<string>("minecraft-closed", ({ payload: instanceId }) => {
         removeRunning(instanceId);
       }),
@@ -206,7 +228,7 @@ export function LaunchProvider({ children }: { children: ReactNode }) {
     return () => {
       unlisteners.forEach((p) => p.then((f) => f()));
     };
-  }, [update, removeRunning]);
+  }, [update, removeRunning, removePending]);
 
   return (
     <LaunchContext.Provider value={{ progressMap, runningInstances, pendingInstances, addRunning, removeRunning, addPending, removePending }}>

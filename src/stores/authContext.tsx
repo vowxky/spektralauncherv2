@@ -74,16 +74,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
         const parsed = JSON.parse(raw)
         if (Array.isArray(parsed.userList)) setUserList(parsed.userList)
         if (parsed.user) {
-          setUser(parsed.user)
-          // Refresh proactivo si el token está expirado (evita fallo al lanzar)
+          // Refresh proactivo y BLOQUEANTE si el token está expirado o por expirar
+          // Esto evita que el usuario vea la pantalla de Login un segundo y luego se restaure,
+          // y garantiza que el token se persiste antes de marcar authReady.
           const exp = (parsed.user as any)?.minecraft?.expires_at
           const rt = (parsed.user as any)?.minecraft?.refresh_token
-          if (typeof exp === 'number' && typeof rt === 'string' && rt.trim() !== '' && Date.now() > exp - 2 * 60 * 1000) {
-            // Fire-and-forget: si falla, el login pedirá re-autenticar
-            invoke<{ access_token: string; refresh_token: string; ms_access_token: string; expires_in?: number; ms_expires_in?: number }>(
-              "refresh_microsoft_token",
-              { refreshToken: rt }
-            ).then((result: any) => {
+          const needsRefresh = typeof exp === 'number' && typeof rt === 'string' && rt.trim() !== '' && Date.now() > exp - 5 * 60 * 1000
+          if (needsRefresh) {
+            try {
+              const result = await invoke<{ access_token: string; refresh_token: string; ms_access_token: string; expires_in?: number; ms_expires_in?: number }>(
+                "refresh_microsoft_token",
+                { refreshToken: rt }
+              ) as any
               const now = Date.now()
               const mcExp = result.expires_in ? now + result.expires_in * 1000 : now + 24*3600*1000
               const msExp = result.ms_expires_in ? now + result.ms_expires_in * 1000 : undefined
@@ -100,15 +102,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
                   ms_expires_in: result.ms_expires_in,
                 }
               }
-              setUser(updated)
-              setUserList(prev => {
+              parsed.user = updated
+              // Sincronizar userList con el token refrescado antes de setear estado
+              if (Array.isArray(parsed.userList)) {
                 const key = userKey(updated)
-                return prev.map(u => userKey(u) === key ? updated : u)
-              })
-            }).catch(e => {
-              console.warn("[auth] auto-refresh al iniciar falló:", e)
-            })
+                parsed.userList = parsed.userList.map((u: User) => userKey(u) === key ? updated : u)
+                setUserList(parsed.userList)
+              }
+              // Persistir inmediatamente el refresh para que el próximo arranque no repita el refresh
+              await invoke("save_auth_json", { payload: JSON.stringify(parsed) }).catch(() => {})
+            } catch (e) {
+              console.warn("[auth] auto-refresh al iniciar falló (se usará token existente):", e)
+            }
           }
+          setUser(parsed.user)
         }
       }
     } catch (e) {

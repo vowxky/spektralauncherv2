@@ -81,37 +81,15 @@ pub async fn ensure_java(
 
     app.emit("java-download-start", serde_json::json!({ "version": java_version })).ok();
 
-    let (url, is_zip) = if cfg!(windows) {
-        (
-            format!(
-                "https://api.adoptium.net/v3/binary/latest/{}/ga/windows/x64/jre/hotspot/normal/eclipse",
-                java_version
-            ),
-            true,
-        )
-    } else if cfg!(target_os = "linux") {
-        (
-            format!(
-                "https://api.adoptium.net/v3/binary/latest/{}/ga/linux/x64/jre/hotspot/normal/eclipse",
-                java_version
-            ),
-            false,
-        )
-    } else if cfg!(target_os = "macos") {
-        (
-            format!(
-                "https://api.adoptium.net/v3/binary/latest/{}/ga/mac/aarch64/jre/hotspot/normal/eclipse",
-                java_version
-            ),
-            false,
-        )
-    } else {
-        return Err("Unsupported OS".into());
-    };
+    let (url, is_zip) = java_download_url(java_version);
 
-    jlog!(app, log_id, java_version, "Downloading Java {} from: {}", java_version, url);
+    jlog!(app, log_id, java_version, "Downloading Java {} from: {} (arch={}, os={})", java_version, url, std::env::consts::ARCH, std::env::consts::OS);
 
-    let response = reqwest::get(&url).await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -177,6 +155,16 @@ pub async fn ensure_java(
     Ok(runtime_path)
 }
 
+fn is_safe_zip_entry(name: &str) -> bool {
+    if name.is_empty() { return false; }
+    if name.starts_with('/') || name.starts_with('\\') { return false; }
+    // Rechaza cualquier componente ".." — previene Zip Slip (CVE)
+    for part in name.split(['/', '\\']) {
+        if part == ".." { return false; }
+    }
+    true
+}
+
 fn extract_zip(data: &[u8], output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use flate2::read::GzDecoder;
     if data.len() >= 2 && &data[0..2] == b"PK" {
@@ -184,8 +172,13 @@ fn extract_zip(data: &[u8], output: &Path) -> Result<(), Box<dyn std::error::Err
         let mut archive = zip::ZipArchive::new(reader)?;
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let outpath = output.join(file.name());
-            if file.name().ends_with('/') {
+            let name = file.name().to_string();
+            if !is_safe_zip_entry(&name) {
+                eprintln!("[java] skipping unsafe zip entry: {}", name);
+                continue;
+            }
+            let outpath = output.join(&name);
+            if name.ends_with('/') {
                 fs::create_dir_all(&outpath)?;
             } else {
                 if let Some(p) = outpath.parent() {
@@ -216,8 +209,62 @@ fn extract_tar_gz(data: &[u8], output: &Path) -> Result<(), Box<dyn std::error::
     let gz = GzDecoder::new(Cursor::new(data));
     let mut archive = Archive::new(gz);
     archive.set_preserve_permissions(true);
-    archive.unpack(output)?;
+    // Itera entradas para validar Zip Slip también en tar.gz
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let path_str = path.to_string_lossy().to_string();
+        if !is_safe_zip_entry(&path_str) {
+            eprintln!("[java] skipping unsafe tar entry: {}", path_str);
+            continue;
+        }
+        entry.unpack_in(output)?;
+    }
     Ok(())
+}
+
+/// Resuelve URL de Adoptium según OS + arch real del dispositivo.
+/// Cubre Windows x64/arm64/x86, Linux x64/aarch64/arm, macOS aarch64/x64.
+fn java_download_url(version: u32) -> (String, bool) {
+    let arch = std::env::consts::ARCH;
+    let is_zip = cfg!(windows);
+    let url = if cfg!(windows) {
+        let win_arch = match arch {
+            "aarch64" => "aarch64",
+            "x86" => "x86",
+            _ => "x64",
+        };
+        format!(
+            "https://api.adoptium.net/v3/binary/latest/{}/ga/windows/{}/jre/hotspot/normal/eclipse",
+            version, win_arch
+        )
+    } else if cfg!(target_os = "linux") {
+        let linux_arch = match arch {
+            "aarch64" => "aarch64",
+            "arm" => "arm",
+            "x86" => "x86",
+            _ => "x64",
+        };
+        format!(
+            "https://api.adoptium.net/v3/binary/latest/{}/ga/linux/{}/jre/hotspot/normal/eclipse",
+            version, linux_arch
+        )
+    } else if cfg!(target_os = "macos") {
+        let mac_arch = match arch {
+            "x86_64" | "x86" => "x64",
+            _ => "aarch64",
+        };
+        format!(
+            "https://api.adoptium.net/v3/binary/latest/{}/ga/mac/{}/jre/hotspot/normal/eclipse",
+            version, mac_arch
+        )
+    } else {
+        format!(
+            "https://api.adoptium.net/v3/binary/latest/{}/ga/linux/x64/jre/hotspot/normal/eclipse",
+            version
+        )
+    };
+    (url, is_zip)
 }
 
 fn fix_java_folder(runtime_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -237,15 +284,38 @@ fn fix_java_folder(runtime_path: &Path) -> Result<(), Box<dyn std::error::Error>
                 let to = runtime_path.join(item.file_name());
 
                 if to.exists() {
-                    if to.is_dir() {
-                        fs::remove_dir_all(&to)?;
-                    } else {
-                        fs::remove_file(&to)?;
+                    // Reintento para Windows: Defender puede tener lock breve
+                    let mut retries = 3;
+                    while to.exists() && retries > 0 {
+                        let res = if to.is_dir() {
+                            fs::remove_dir_all(&to)
+                        } else {
+                            fs::remove_file(&to)
+                        };
+                        if res.is_ok() { break; }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        retries -= 1;
+                    }
+                    // último intento sin ignorar error
+                    if to.exists() {
+                        if to.is_dir() { fs::remove_dir_all(&to)?; } else { fs::remove_file(&to)?; }
                     }
                 }
-                fs::rename(&from, &to)?;
+                // rename también puede fallar por lock en Windows
+                let mut retries = 3;
+                loop {
+                    match fs::rename(&from, &to) {
+                        Ok(_) => break,
+                        Err(e) if retries > 0 => {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            retries -= 1;
+                            if retries == 0 { return Err(e.into()); }
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
             }
-            fs::remove_dir_all(&inner)?;
+            let _ = fs::remove_dir_all(&inner);
         }
     }
 

@@ -81,7 +81,17 @@ pub fn set_config(key: String, value: Value) {
         }
     }
 
-    fs::write(path, serde_json::to_string_pretty(&config).unwrap()).expect("Error saving config");
+    let json = match serde_json::to_string_pretty(&config) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("[config] serialize error for {}: {}", key, e);
+            return;
+        }
+    };
+    if let Err(e) = fs::write(&path, json) {
+        eprintln!("[config] no se pudo escribir {}: {}", path.display(), e);
+        return;
+    }
 
     println!("OK: {} = {}", key, value);
 }
@@ -107,13 +117,13 @@ pub fn get_install_dir() -> String {
 pub async fn pick_install_dir(app: tauri::AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
     app.dialog().file().pick_folder(move |folder| {
-        tx.send(folder).ok();
+        let _ = tx.send(folder);
     });
 
-    let folder = rx.recv().map_err(|e| e.to_string())?;
+    let folder = rx.await.map_err(|e| e.to_string())?;
 
     let path = folder
         .ok_or_else(|| "Cancelled".to_string())?

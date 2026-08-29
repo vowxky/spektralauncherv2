@@ -79,12 +79,12 @@ pub async fn install_java_runtime(app: AppHandle, version: u32) -> Result<JavaRu
 pub async fn pick_java_runtime(app: AppHandle, version: u32) -> Result<JavaRuntimeStatus, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().pick_folder(move |folder| {
-        tx.send(folder).ok();
+        let _ = tx.send(folder);
     });
 
-    let folder = rx.recv().map_err(|error| error.to_string())?;
+    let folder = rx.await.map_err(|error| error.to_string())?;
     let path = folder
         .ok_or_else(|| "Cancelled".to_string())?
         .into_path()

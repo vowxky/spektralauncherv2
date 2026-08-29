@@ -24,14 +24,24 @@ pub struct InstanceManager {
 impl InstanceManager {
     fn get_path() -> PathBuf {
         let dir = crate::commands::config::get_install_dir_path();
-        fs::create_dir_all(&dir).unwrap();
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("[InstanceManager] no se pudo crear {}: {}", dir.display(), e);
+        }
         dir.join("instances.json")
     }
 
     pub fn save(&self) {
         let path = Self::get_path();
-        let json = serde_json::to_string_pretty(&self).unwrap();
-        fs::write(path, json).unwrap();
+        let json = match serde_json::to_string_pretty(&self) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("[InstanceManager] serialize error: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = fs::write(&path, json) {
+            eprintln!("[InstanceManager] no se pudo escribir {}: {}", path.display(), e);
+        }
     }
 
     pub fn create_instance(
@@ -60,7 +70,9 @@ impl InstanceManager {
 
         let folder_name = slug.as_deref().unwrap_or(&name).to_string();
         let path = base_path.join(&folder_name);
-        fs::create_dir_all(&path).unwrap();
+        if let Err(e) = fs::create_dir_all(&path) {
+            eprintln!("[InstanceManager] no se pudo crear instancia {}: {}", path.display(), e);
+        }
 
         let instance = Instance {
             id,

@@ -4,9 +4,11 @@ use futures::stream::{self, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use std::{fs, path::PathBuf};
 use tauri::Emitter;
 use tauri::{command, AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,9 +48,25 @@ fn build_client_with_timeout(secs: u64) -> reqwest::Client {
         .no_gzip()
         .no_brotli()
         .no_deflate()
-        .timeout(std::time::Duration::from_secs(secs))
+        .timeout(Duration::from_secs(secs))
         .build()
         .unwrap_or_default()
+}
+
+fn emit_launch_error(app: &AppHandle, log_id: &str, instance_id: &str, msg: &str) {
+    ilog_err!(app, log_id, "LAUNCH ERROR: {}", msg);
+    app.emit("minecraft-error", serde_json::json!({ "instanceId": instance_id, "message": msg })).ok();
+    app.emit("minecraft-status", serde_json::json!({ "instanceId": instance_id, "status": format!("Error: {}", msg), "indeterminate": false })).ok();
+    // Popup nativo del OS — siempre visible aunque el frontend esté congelado en 95%
+    let title = "Error al iniciar Minecraft".to_string();
+    let body = msg.to_string();
+    // dialog().message().show() usa callback, no bloquea el runtime de Tauri
+    app.dialog().message(body).title(title).show(|_| {});
+}
+
+fn emit_progress_error(app: &AppHandle, instance_id: &str, msg: &str) {
+    app.emit("minecraft-error", serde_json::json!({ "instanceId": instance_id, "message": msg })).ok();
+    app.emit("minecraft-status", serde_json::json!({ "instanceId": instance_id, "status": format!("Error: {}", msg) })).ok();
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -406,8 +424,15 @@ pub async fn install_instance_files(
                         Ok(mut archive) => {
                             for i in 0..archive.len() {
                                 if let Ok(mut zip_file) = archive.by_index(i) {
-                                    let out_path = instance_dir.join(zip_file.name());
-                                    if zip_file.name().ends_with('/') {
+                                    let name = zip_file.name().to_string();
+                                    // Zip Slip: rechaza entradas con ".." o rutas absolutas
+                                    let is_unsafe = name.starts_with('/') || name.starts_with('\\') || name.split(['/', '\\']).any(|p| p == "..");
+                                    if is_unsafe {
+                                        ilog_err!(&app, &log_id, "Skipping unsafe entry in overrides.zip: {}", name);
+                                        continue;
+                                    }
+                                    let out_path = instance_dir.join(&name);
+                                    if name.ends_with('/') {
                                         fs::create_dir_all(&out_path).ok();
                                     } else {
                                         if let Some(parent) = out_path.parent() {
@@ -628,10 +653,34 @@ pub async fn launch_instance_cmd(
         .filter(|settings| settings.java_mode.as_deref() == Some("custom"))
         .and_then(|settings| settings.java_path.as_deref())
         .map(str::trim)
-        .filter(|path| !path.is_empty());
+        .filter(|path| !path.is_empty())
+        .map(|p| {
+            // Normaliza: acepta "C:/java17", "C:/java17/bin", "C:/java17/bin/java.exe"
+            let pb = PathBuf::from(p);
+            let s = pb.to_string_lossy().to_lowercase();
+            if s.ends_with("java.exe") || s.ends_with("java") {
+                pb.parent().and_then(|x| x.parent()).map(|x| x.to_path_buf()).unwrap_or(pb)
+            } else if pb.file_name().map(|n| n.to_string_lossy().to_lowercase() == "bin").unwrap_or(false) {
+                pb.parent().map(|x| x.to_path_buf()).unwrap_or(pb)
+            } else {
+                pb
+            }
+        });
+    // Clamp de RAM según RAM real del sistema (evita OOM en PC de 4GB)
+    let total_ram_mb: u64 = {
+        let mut sys = sysinfo::System::new_all();
+        sys.refresh_memory();
+        sys.total_memory() / 1024 / 1024
+    };
+    let safe_max = if total_ram_mb > 0 { ((total_ram_mb as f64 * 0.7) as u64).max(1024) } else { 8192 };
+    let clamped_max_ram = max_ram.min(safe_max);
+    let clamped_min_ram = min_ram.min(clamped_max_ram).max(512);
+    if clamped_max_ram != max_ram {
+        ilog!(&app, &log_id, "RAM solicitada {}M excede 70% del sistema ({}M) -> clamp a {}M", max_ram, total_ram_mb, clamped_max_ram);
+    }
     let java_options = custom_java_path
         .map(|path| JavaOptions {
-            path: Some(PathBuf::from(path)),
+            path: Some(path),
             ..Default::default()
         })
         .unwrap_or_default();
@@ -675,8 +724,8 @@ pub async fn launch_instance_cmd(
             ..Default::default()
         },
         memory: MemoryConfig {
-            min: format!("{}M", min_ram),
-            max: format!("{}M", max_ram),
+            min: format!("{}M", clamped_min_ram),
+            max: format!("{}M", clamped_max_ram),
         },
         screen: ScreenConfig {
             width: Some(launch_width),
@@ -781,8 +830,13 @@ pub async fn launch_instance_cmd(
                 }
                 LaunchEvent::Error(ref msg) => {
                     ilog_err!(&app_ev, &log_id_ev, "{}", msg);
+                    app_ev.emit("minecraft-error", serde_json::json!({ "instanceId": &iid, "message": msg })).ok();
+                    app_ev.emit("minecraft-status", serde_json::json!({ "instanceId": &iid, "status": format!("Error: {}", msg) })).ok();
                 }
-                _ => {}
+                other => {
+                    // Loguear eventos no mapeados para evitar "95% congelado" sin razón visible
+                    ilog!(&app_ev, &log_id_ev, "[evento] {:?}", other);
+                }
             }
         }
     });
@@ -806,18 +860,49 @@ pub async fn launch_instance_cmd(
         state.download_notify.notified().await;
     }
 
-    ilog!(&app, &log_id, "Downloading game files...");
+    ilog!(&app, &log_id, "Downloading game files... (OS={}, arch={})", std::env::consts::OS, std::env::consts::ARCH);
     let mut launcher = Launcher::new(options);
-    let download_result = launcher.download_game(tx.clone()).await;
 
-    // Release download slot regardless of success or failure.
+    // Timeout absoluto para evitar 95% colgado infinito en Windows (Defender / firewall / stream cortado)
+    // Nota: el slot SIEMPRE se libera aunque haya timeout — evita deadlock en reintentos de la misma versión
+    let raw_download = tokio::time::timeout(Duration::from_secs(300), launcher.download_game(tx.clone())).await;
+    // Release download slot regardless of success, failure, or timeout.
     state.downloading.lock().unwrap().remove(&instance_id);
     state.download_notify.notify_waiters();
 
-    download_result.map_err(|e| e.to_string())?;
+    let download_result: Result<(), String> = match raw_download {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => {
+            let msg = "Tiempo agotado descargando archivos (300s). Revisa firewall/antivirus, conexión y vuelve a intentar. Si persiste, borra engine_data/libraries y reintenta.";
+            emit_launch_error(&app, &log_id, &instance_id, msg);
+            return Err(msg.to_string());
+        }
+    };
+
+    if let Err(e) = &download_result {
+        let msg = format!("Error descargando: {}", e);
+        emit_launch_error(&app, &log_id, &instance_id, &msg);
+        // limpiar barra de progreso en frontend
+        app.emit("minecraft-progress", serde_json::json!({ "instanceId": &instance_id, "current": 0, "total": 100 })).ok();
+        return Err(msg);
+    }
 
     ilog!(&app, &log_id, "Launching Minecraft...");
-    let mut child = launcher.launch(tx).await.map_err(|e| e.to_string())?;
+    let mut child = match tokio::time::timeout(Duration::from_secs(45), launcher.launch(tx)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            let msg = format!("Error al lanzar: {}. Verifica Java, RAM asignada y que el antivirus no bloqueó java.exe", e);
+            emit_launch_error(&app, &log_id, &instance_id, &msg);
+            return Err(msg);
+        }
+        Err(_) => {
+            let log_hint = crate::logger::log_dir().display().to_string();
+            let msg = format!("Tiempo agotado iniciando Minecraft (45s). Posible bloqueo de antivirus/firewall sobre java.exe o natives. Revisa los logs en {}", log_hint);
+            emit_launch_error(&app, &log_id, &instance_id, &msg);
+            return Err(msg);
+        }
+    };
 
     let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
     state
@@ -915,8 +1000,11 @@ pub fn load_local_instances(app: AppHandle) -> Vec<LocalInstance> {
     if !root.exists() {
         return vec![];
     }
-    let mut list: Vec<LocalInstance> = fs::read_dir(&root)
-        .unwrap_or_else(|_| return std::fs::read_dir(".").unwrap())
+    let Ok(entries) = fs::read_dir(&root) else {
+        eprintln!("[load_local_instances] no se pudo leer {} — devolviendo vacío", root.display());
+        return vec![];
+    };
+    let mut list: Vec<LocalInstance> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {

@@ -224,59 +224,48 @@ fn save_to_file(payload: &str) -> Result<(), String> {
 pub fn save_auth_json(payload: String) -> Result<(), String> {
     // Validar que sea JSON válido antes de tocar disco/keychain
     serde_json::from_str::<Value>(&payload).map_err(|e| format!("payload no es JSON válido: {}", e))?;
-    // 1) Intento keychain OS (sin prompt, atado al login del usuario)
-    //    Si funciona, es la fuente de verdad y borramos el archivo plano para no dejar tokens en texto
-    match save_to_keyring(&payload) {
-        Ok(()) => {
-            // Migración: eliminar archivo plano si existe (no falla si no existe)
-            let path = auth_store_path();
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
-            return Ok(());
+    // Estrategia espejo: keyring como primario (cifrado por OS), archivo como respaldo.
+    // Nunca borramos el archivo tras éxito en keyring — sirve de fallback si Secret Service
+    // está bloqueado al arranque (muy común en Linux) o si el keyring falla intermitentemente.
+    let keyring_res = save_to_keyring(&payload);
+    let file_res = save_to_file(&payload);
+    match (&keyring_res, &file_res) {
+        (Ok(_), Ok(_)) => {
+            eprintln!("[auth] sesión guardada en keyring + archivo (espejo)");
+            Ok(())
         }
-        Err(e) => {
-            eprintln!("[auth] keychain no disponible, fallback a archivo: {}", e);
+        (Ok(_), Err(e)) => {
+            eprintln!("[auth] keyring OK, fallo al guardar respaldo en archivo: {}", e);
+            Ok(())
         }
+        (Err(k), Ok(_)) => {
+            eprintln!("[auth] keychain no disponible ({}), guardado solo en archivo como fallback", k);
+            Ok(())
+        }
+        (Err(k), Err(f)) => Err(format!("No se pudo guardar sesión — keyring: {} | archivo: {}", k, f)),
     }
-    // 2) Fallback a archivo (compatibilidad / entornos sin keychain)
-    save_to_file(&payload)
 }
 
 #[command]
 pub fn get_auth_json() -> Option<String> {
-    // 1) Keychain primero — fuente de verdad segura
+    // 1) Keychain primero — fuente de verdad segura y cifrada por OS
     if let Some(v) = get_from_keyring() {
         return Some(v);
     }
-    // 2) Fallback archivo
+    // 2) Fallback archivo (respaldo espejo / entornos sin keychain)
     let path = auth_store_path();
     let file_content = match std::fs::read_to_string(&path) {
         Ok(v) if !v.trim().is_empty() && serde_json::from_str::<Value>(&v).is_ok() => v,
         _ => return None,
     };
-    // En dev no forzamos re-login para no molestar (mantiene compatibilidad)
-    if cfg!(debug_assertions) {
-        eprintln!("[auth] dev mode: sesión legacy encontrada, usando archivo sin forzar re-login");
-        return Some(file_content);
-    }
-    // Intentar migrar a keychain para saber si el backend está disponible.
-    // En entornos sin Secret Service / keychain, esto falla y hacemos fallback silencioso
-    // sin forzar re-login (evita loop infinito).
-    // En producción con keychain OK, forzamos un re-login ÚNICO para que los tokens
-    // se regeneren ya cifrados y con la nueva estructura expires_at.
+    // Migración silenciosa: intentar copiar al keyring sin forzar re-login.
+    // Si falla (Secret Service bloqueado, headless, etc.) seguimos usando el archivo.
+    // Nunca borramos el archivo ni el keyring aquí — evita pérdida de sesión.
     match save_to_keyring(&file_content) {
-        Ok(()) => {
-            eprintln!("[auth] sesión legacy detectada — forzando re-login único para migrar a keychain");
-            let _ = std::fs::remove_file(&path);
-            clear_keyring(); // borra la copia migrada para exigir login fresco
-            None // fuerza Login en el frontend
-        }
-        Err(e) => {
-            eprintln!("[auth] keychain no disponible ({}), usando archivo como fallback sin forzar", e);
-            Some(file_content)
-        }
+        Ok(()) => eprintln!("[auth] sesión migrada silenciosamente a keyring (archivo conservado como respaldo)"),
+        Err(e) => eprintln!("[auth] keyring no disponible ({}), usando archivo como fuente sin migrar", e),
     }
+    Some(file_content)
 }
 
 #[command]
@@ -519,6 +508,7 @@ async fn check_minecraft_entitlements(access_token: &str) -> Result<(), String> 
     Ok(())
 }
 
+#[allow(dead_code)]
 fn offline_uuid(username: &str) -> String {
     let name = format!("OfflinePlayer:{}", username);
     let digest = md5::compute(name.as_bytes());
@@ -563,6 +553,7 @@ async fn get_xbox_xuid(ms_access_token: &str) -> Result<String, String> {
     Ok(xuid)
 }
 
+#[allow(dead_code)]
 async fn get_xbox_gamertag(ms_access_token: &str) -> Result<String, String> {
     let client = http_client();
     // 1) Xbox Live authenticate para obtener XBL token

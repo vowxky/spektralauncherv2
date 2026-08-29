@@ -32,15 +32,35 @@ function AppInner() {
   const [loadingDone, setLoadingDone] = useState(false);
   useUpdate();
 
-  const winLabel = (() => {
+  const [winLabel, setWinLabel] = useState<string>(() => {
     try {
       return getCurrentWindow().label;
     } catch {
       return "main";
     }
-  })();
+  });
+
+  useEffect(() => {
+    // Re-evaluar por si el label no estuvo listo en el primer render (WebView2 Windows)
+    try {
+      const lbl = getCurrentWindow().label;
+      if (lbl && lbl !== winLabel) setWinLabel(lbl);
+    } catch {}
+    // Fallback: si la URL contiene label=logs (/debug)
+    if (window.location.hash.includes("logs") && winLabel !== "logs") {
+      setWinLabel("logs");
+    }
+  }, [winLabel]);
 
   const isLogsWindow = winLabel === "logs";
+
+  // Evitar flash blanco en Windows antes de que React pinte — fondo oscuro inmediato
+  useEffect(() => {
+    if (isLogsWindow) {
+      document.documentElement.style.backgroundColor = "#0a0a0c";
+      document.body.style.backgroundColor = "#0a0a0c";
+    }
+  }, [isLogsWindow]);
 
   useEffect(() => {
     if (isLogsWindow) {

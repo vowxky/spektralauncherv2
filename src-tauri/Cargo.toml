@@ -1,6 +1,6 @@
 [package]
 name = "Spektra"
-version = "1.0.5"
+version = "1.0.7"
 description = "Spektra"
 authors = ["primeCigarrete"]
 license = "ARR"
@@ -60,7 +60,6 @@ windows-core = "=0.61.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
-windows_subsystem = "windows"
 opt-level = "z"
 lto = true
 codegen-units = 1

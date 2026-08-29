@@ -26,15 +26,20 @@ fn open_logs_window(app: tauri::AppHandle) -> Result<(), String> {
         win.unminimize().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    let _win = tauri::WebviewWindowBuilder::new(&app, "logs", tauri::WebviewUrl::App("index.html".into()))
+    let win = tauri::WebviewWindowBuilder::new(&app, "logs", tauri::WebviewUrl::App("index.html".into()))
         .title("Logs — Spektra")
         .inner_size(900.0, 650.0)
         .min_inner_size(600.0, 400.0)
         .center()
         .resizable(true)
         .decorations(true)
+        .background_color(tauri::window::Color(10, 10, 12, 255))
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    disable_tracking_prevention(&win);
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -98,7 +103,7 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     {
-        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+        let _is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
             || std::env::var("XDG_SESSION_TYPE")
                 .map(|v| v == "wayland")
                 .unwrap_or(false);
