@@ -311,18 +311,14 @@ export function InstanceProvider({
           landscape: featuredLandscape,
         });
       
+        await invoke("install_instance_files", {
+          instanceId: instance.id,
+        });
+
         setInstalledInstances((prev) => {
           if (prev.find((i) => i.id === instance.id)) return prev;
           return [...prev, instance];
         });
-      
-        try {
-          await invoke("install_instance_files", {
-            instanceId: instance.id,
-          });
-        } catch (installErr) {
-          console.warn("[Install] Error downloading files, continuing anyway:", installErr);
-        }
 
         setLaunchedInstanceId(instance.id);
 

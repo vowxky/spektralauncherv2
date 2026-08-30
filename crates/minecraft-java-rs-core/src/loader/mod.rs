@@ -24,10 +24,17 @@ async fn save_loader_version(
     json: &impl serde::Serialize,
 ) -> Result<(), LoaderError> {
     let dir = loader_dir.join("versions").join(id);
-    tokio::fs::create_dir_all(&dir).await?;
-    let content = serde_json::to_string(json)?;
-    tokio::fs::write(dir.join(format!("{id}.json")), content).await?;
-    Ok(())
+    let path = dir.join(format!("{id}.json"));
+    let content = serde_json::to_vec_pretty(json)?;
+    tokio::task::spawn_blocking(move || crate::utils::persistence::write_atomic(&path, &content))
+        .await
+        .map_err(|error| {
+            LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                error.to_string(),
+            ))
+        })?
+        .map_err(LoaderError::Io)
 }
 
 use self::fabric::{FabricMC, FabricVariant};

@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 
-use futures::stream::{self, StreamExt};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Component, Path, PathBuf}};
 use tauri::Emitter;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -27,6 +26,8 @@ use minecraft_java_rs_core::{
         Launcher,
     },
     models::{loader::LoaderType, minecraft::Authenticator},
+    net::downloader::{DownloadItem, Downloader},
+    utils::persistence::{load_json, save_json, write_atomic},
 };
 use tokio::sync::mpsc;
 
@@ -86,8 +87,25 @@ pub struct InstanceRuntimeSettings {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SyncManifest {
+    #[serde(default)]
+    schema_version: u32,
     files: HashMap<String, String>,
     overrides_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RemoteHashes {
+    sha1: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RemoteInstanceFile {
+    path: String,
+    #[serde(default)]
+    hashes: RemoteHashes,
+    #[serde(default)]
+    downloads: Vec<String>,
+    size: Option<u64>,
 }
 
 fn manifest_path(instance_dir: &PathBuf) -> PathBuf {
@@ -95,22 +113,44 @@ fn manifest_path(instance_dir: &PathBuf) -> PathBuf {
 }
 
 fn load_manifest(instance_dir: &PathBuf) -> SyncManifest {
-    fs::read_to_string(manifest_path(instance_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    load_json(&manifest_path(instance_dir)).unwrap_or_default()
 }
 
-fn save_manifest(instance_dir: &PathBuf, manifest: &SyncManifest) {
-    if let Ok(json) = serde_json::to_string_pretty(manifest) {
-        fs::write(manifest_path(instance_dir), json).ok();
-    }
+fn save_manifest(instance_dir: &PathBuf, manifest: &SyncManifest) -> Result<(), String> {
+    save_json(&manifest_path(instance_dir), manifest)
 }
 
 fn sha1_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+fn sha1_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha1::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn safe_instance_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("Ruta de archivo no válida: {}", relative));
+    }
+    Ok(root.join(path))
 }
 
 #[command]
@@ -253,36 +293,38 @@ pub async fn install_instance_files(
     };
     let log_id = format!("{}-{}", instance.id, instance.slug.as_deref().unwrap_or(""));
     let instance_dir = instance.path.clone();
-    fs::create_dir_all(&instance_dir).ok();
+    fs::create_dir_all(&instance_dir).map_err(|error| error.to_string())?;
 
     let url = format!("{}/instance/{}/files", API_URL, instance_id);
     let client = build_client_with_timeout(300);
-    let files: Vec<Value> = client
+    let response = client
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Error fetching files: {}", e))?
-        .json()
+        .map_err(|error| format!("Error descargando el manifiesto: {}", error))?
+        .error_for_status()
+        .map_err(|error| format!("El servidor rechazó el manifiesto: {}", error))?;
+    let manifest_text = response
+        .text()
         .await
-        .map_err(|e| format!("Error parsing files JSON: {}", e))?;
+        .map_err(|error| format!("Error leyendo el manifiesto: {}", error))?;
+    let files: Vec<RemoteInstanceFile> = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("El manifiesto de archivos contiene JSON inválido: {}", error))?;
     ilog!(&app, &log_id, "Total remote files: {}", files.len());
-    let sorted_files = files.clone();
-    let overrides = sorted_files
+    let total = files.len();
+    let overrides = files
         .iter()
-        .find(|f| f["path"].as_str() == Some("overrides.zip"))
+        .find(|file| file.path == "overrides.zip")
         .cloned();
-    let regular_files: Vec<Value> = sorted_files
-        .iter()
-        .filter(|f| f["path"].as_str() != Some("overrides.zip"))
-        .cloned()
+    let regular_files: Vec<RemoteInstanceFile> = files
+        .into_iter()
+        .filter(|file| file.path != "overrides.zip")
         .collect();
-    let total = sorted_files.len();
 
-    // --- Reconciliar contra el manifest anterior: borrar lo que ya no está ---
     let mut manifest = load_manifest(&instance_dir);
     let remote_paths: HashSet<String> = regular_files
         .iter()
-        .filter_map(|f| f["path"].as_str().map(|s| s.to_string()))
+        .map(|file| file.path.clone())
         .collect();
     let to_delete: Vec<String> = manifest
         .files
@@ -290,173 +332,179 @@ pub async fn install_instance_files(
         .filter(|p| !remote_paths.contains(*p))
         .cloned()
         .collect();
-    for path in &to_delete {
-        let local_path = instance_dir.join(path);
-        if local_path.exists() {
-            if let Err(e) = fs::remove_file(&local_path) {
-                ilog_err!(&app, &log_id, "No se pudo borrar {}: {}", path, e);
-            } else {
-                ilog!(&app, &log_id, "Eliminado (ya no está en el modpack): {}", path);
+    let mut pending = Vec::new();
+    let mut new_hashes = HashMap::new();
+    for file in &regular_files {
+        let local_path = safe_instance_path(&instance_dir, &file.path)?;
+        let expected_hash = file.hashes.sha1.as_ref().map(|hash| hash.to_lowercase());
+        let expected_size = file.size.unwrap_or(0);
+        let size_matches = local_path
+            .metadata()
+            .map(|metadata| expected_size == 0 || metadata.len() == expected_size)
+            .unwrap_or(false);
+        let existing_hash = if local_path.exists()
+            && size_matches
+            && expected_hash.is_some()
+        {
+            sha1_file(&local_path).ok()
+        } else {
+            None
+        };
+        let valid = local_path.exists()
+            && size_matches
+            && match &expected_hash {
+                Some(hash) => existing_hash.as_ref() == Some(hash),
+                None => true,
+            };
+
+        if valid {
+            new_hashes.insert(
+                file.path.clone(),
+                expected_hash
+                    .or(existing_hash)
+                    .unwrap_or_else(|| manifest.files.get(&file.path).cloned().unwrap_or_default()),
+            );
+            continue;
+        }
+
+        let download_url = file
+            .downloads
+            .first()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{} no tiene una URL de descarga", file.path))?;
+        let parent = local_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| instance_dir.clone());
+        pending.push(DownloadItem {
+            url: download_url.clone(),
+            path: local_path,
+            folder: parent,
+            name: file.path.clone(),
+            size: expected_size,
+            r#type: Some("instance".to_string()),
+            sha1: expected_hash,
+        });
+    }
+
+    let already_valid = regular_files.len().saturating_sub(pending.len());
+    if !pending.is_empty() {
+        ilog!(
+            &app,
+            &log_id,
+            "Descargando {} archivos con verificación de integridad",
+            pending.len()
+        );
+        let downloader = Downloader::new(300, 16, false, None);
+        let (event_tx, mut event_rx) = mpsc::channel::<LaunchEvent>(256);
+        let progress_app = app.clone();
+        let progress_instance = instance_id.clone();
+        let progress_task = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if let LaunchEvent::Progress { downloaded, .. } = event {
+                    progress_app
+                        .emit(
+                            "instance-progress",
+                            serde_json::json!({
+                                "instanceId": &progress_instance,
+                                "current": already_valid + downloaded as usize,
+                                "total": total
+                            }),
+                        )
+                        .ok();
+                }
             }
+        });
+        let download_result = downloader.download_multiple(pending, event_tx).await;
+        let _ = progress_task.await;
+        download_result.map_err(|error| format!("Instalación incompleta: {}", error))?;
+    }
+
+    for file in &regular_files {
+        let local_path = safe_instance_path(&instance_dir, &file.path)?;
+        let actual_hash = match file.hashes.sha1.as_ref() {
+            Some(hash) => hash.to_lowercase(),
+            None => sha1_file(&local_path)
+                .map_err(|error| format!("No se pudo verificar {}: {}", file.path, error))?,
+        };
+        new_hashes.insert(file.path.clone(), actual_hash);
+    }
+    manifest.files = new_hashes;
+
+    if let Some(file) = overrides {
+        let local_path = safe_instance_path(&instance_dir, &file.path)?;
+        let download_url = file
+            .downloads
+            .first()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "overrides.zip no tiene una URL de descarga".to_string())?;
+        let expected_hash = file.hashes.sha1.as_ref().map(|hash| hash.to_lowercase());
+        let should_download = expected_hash
+            .as_ref()
+            .map_or(true, |hash| manifest.overrides_hash.as_ref() != Some(hash));
+
+        if should_download {
+            let downloader = Downloader::new(300, 1, false, None);
+            downloader
+                .download_file(&DownloadItem {
+                    url: download_url.clone(),
+                    path: local_path.clone(),
+                    folder: instance_dir.clone(),
+                    name: file.path.clone(),
+                    size: file.size.unwrap_or(0),
+                    r#type: Some("overrides".to_string()),
+                    sha1: expected_hash,
+                })
+                .await
+                .map_err(|error| format!("No se pudo descargar overrides.zip: {}", error))?;
+
+            let zip_bytes = fs::read(&local_path)
+                .map_err(|error| format!("No se pudo leer overrides.zip: {}", error))?;
+            let extracted_hash = sha1_hex(&zip_bytes);
+            let cursor = std::io::Cursor::new(zip_bytes);
+            let mut archive = zip::ZipArchive::new(cursor)
+                .map_err(|error| format!("overrides.zip está dañado: {}", error))?;
+            app.emit(
+                "instance-status",
+                serde_json::json!({ "instanceId": &instance_id, "status": "Extracting overrides..." }),
+            )
+            .ok();
+            for index in 0..archive.len() {
+                let mut zip_file = archive
+                    .by_index(index)
+                    .map_err(|error| format!("No se pudo leer overrides.zip: {}", error))?;
+                let enclosed = zip_file
+                    .enclosed_name()
+                    .ok_or_else(|| format!("Ruta insegura en overrides.zip: {}", zip_file.name()))?
+                    .to_path_buf();
+                let out_path = instance_dir.join(enclosed);
+                if zip_file.is_dir() {
+                    fs::create_dir_all(&out_path).map_err(|error| error.to_string())?;
+                } else {
+                    let mut contents = Vec::new();
+                    zip_file
+                        .read_to_end(&mut contents)
+                        .map_err(|error| format!("No se pudo extraer {}: {}", zip_file.name(), error))?;
+                    write_atomic(&out_path, &contents)
+                        .map_err(|error| format!("No se pudo guardar {}: {}", out_path.display(), error))?;
+                }
+            }
+            let _ = fs::remove_file(&local_path);
+            manifest.overrides_hash = Some(extracted_hash);
+        }
+    }
+
+    for path in &to_delete {
+        let local_path = safe_instance_path(&instance_dir, path)?;
+        if local_path.exists() {
+            fs::remove_file(&local_path)
+                .map_err(|error| format!("No se pudo borrar {}: {}", path, error))?;
         }
         manifest.files.remove(path);
     }
 
-    let count = AtomicUsize::new(0);
-    let new_hashes: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-
-    stream::iter(regular_files)
-        .for_each_concurrent(256, |file| {
-            let client = client.clone();
-            let instance_dir = instance_dir.clone();
-            let app = app.clone();
-            let log_id = log_id.clone();
-            let iid = instance_id.clone();
-            let count = &count;
-            let manifest_files = manifest.files.clone();
-            let new_hashes = new_hashes.clone();
-            async move {
-                let file_path = file["path"].as_str().unwrap_or("").to_string();
-                if file_path.is_empty() {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                let remote_hash = file["hashes"]["sha1"].as_str().map(|s| s.to_string());
-                let local_path = instance_dir.join(&file_path);
-                if let Some(parent) = local_path.parent() {
-                    fs::create_dir_all(parent).ok();
-                }
-
-                let needs_download = if !local_path.exists() {
-                    true
-                } else if let Some(rh) = &remote_hash {
-                    manifest_files.get(&file_path) != Some(rh)
-                } else {
-                    false
-                };
-
-                if needs_download {
-                    let downloads = file["downloads"]
-                        .as_array()
-                        .and_then(|d| d.first().cloned());
-                    if let Some(dl_url) = downloads.and_then(|u| u.as_str().map(|s| s.to_string())) {
-                        match client.get(&dl_url).send().await {
-                            Ok(resp) => match resp.bytes().await {
-                                Ok(bytes) => {
-                                    let hash = remote_hash.clone().unwrap_or_else(|| sha1_hex(&bytes));
-                                    fs::write(&local_path, &bytes).ok();
-                                    new_hashes.lock().unwrap().insert(file_path.clone(), hash);
-                                    ilog!(&app, &log_id, "Actualizado: {}", file_path);
-                                }
-                                Err(e) => ilog_err!(
-                                    &app,
-                                    &log_id,
-                                    "Error reading bytes {}: {}",
-                                    file_path,
-                                    e
-                                ),
-                            },
-                            Err(e) => {
-                                ilog_err!(&app, &log_id, "Error downloading {}: {}", file_path, e)
-                            }
-                        }
-                    }
-                } else if let Some(rh) = remote_hash {
-                    new_hashes.lock().unwrap().insert(file_path.clone(), rh);
-                } else if let Some(prev) = manifest_files.get(&file_path) {
-                    new_hashes.lock().unwrap().insert(file_path.clone(), prev.clone());
-                } else {
-                    new_hashes.lock().unwrap().insert(file_path.clone(), String::new());
-                }
-
-                let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit(
-                    "instance-progress",
-                    serde_json::json!({ "instanceId": &iid, "current": c, "total": total }),
-                )
-                .ok();
-            }
-        })
-        .await;
-
-    manifest.files = new_hashes.lock().unwrap().clone();
-
-    if let Some(file) = overrides {
-        let file_path = "overrides.zip";
-        let local_path = instance_dir.join(file_path);
-        let downloads = file["downloads"].as_array();
-        if let Some(dl_list) = downloads {
-            if let Some(dl_url) = dl_list.first().and_then(|u| u.as_str()) {
-                match client.get(dl_url).send().await {
-                    Ok(resp) => match resp.bytes().await {
-                        Ok(bytes) => {
-                            let hash = sha1_hex(&bytes);
-                            if manifest.overrides_hash.as_deref() != Some(hash.as_str()) {
-                                fs::write(&local_path, &bytes).ok();
-                                ilog!(&app, &log_id, "overrides.zip descargado (cambió)");
-                            } else {
-                                ilog!(&app, &log_id, "overrides.zip sin cambios, se omite");
-                            }
-                        }
-                        Err(e) => {
-                            ilog_err!(&app, &log_id, "Error reading bytes overrides.zip: {}", e)
-                        }
-                    },
-                    Err(e) => ilog_err!(&app, &log_id, "Error downloading overrides.zip: {}", e),
-                }
-            }
-        }
-        let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-        app.emit(
-            "instance-progress",
-            serde_json::json!({ "instanceId": &instance_id, "current": c, "total": total }),
-        )
-        .ok();
-        if local_path.exists() {
-            ilog!(&app, &log_id, "Extracting overrides.zip...");
-            app.emit("instance-status", serde_json::json!({ "instanceId": &instance_id, "status": "Extracting overrides..." })).ok();
-            match fs::read(&local_path) {
-                Ok(zip_bytes) => {
-                    let extracted_hash = sha1_hex(&zip_bytes);
-                    let cursor = std::io::Cursor::new(zip_bytes);
-                    match zip::ZipArchive::new(cursor) {
-                        Ok(mut archive) => {
-                            for i in 0..archive.len() {
-                                if let Ok(mut zip_file) = archive.by_index(i) {
-                                    let name = zip_file.name().to_string();
-                                    // Zip Slip: rechaza entradas con ".." o rutas absolutas
-                                    let is_unsafe = name.starts_with('/') || name.starts_with('\\') || name.split(['/', '\\']).any(|p| p == "..");
-                                    if is_unsafe {
-                                        ilog_err!(&app, &log_id, "Skipping unsafe entry in overrides.zip: {}", name);
-                                        continue;
-                                    }
-                                    let out_path = instance_dir.join(&name);
-                                    if name.ends_with('/') {
-                                        fs::create_dir_all(&out_path).ok();
-                                    } else {
-                                        if let Some(parent) = out_path.parent() {
-                                            fs::create_dir_all(parent).ok();
-                                        }
-                                        if let Ok(mut out_file) = fs::File::create(&out_path) {
-                                            std::io::copy(&mut zip_file, &mut out_file).ok();
-                                        }
-                                    }
-                                }
-                            }
-                            ilog!(&app, &log_id, "overrides.zip extracted successfully");
-                            fs::remove_file(&local_path).ok();
-                            manifest.overrides_hash = Some(extracted_hash);
-                        }
-                        Err(e) => ilog_err!(&app, &log_id, "Error opening overrides.zip: {}", e),
-                    }
-                }
-                Err(e) => ilog_err!(&app, &log_id, "Error reading overrides.zip: {}", e),
-            }
-        }
-    }
-
-    save_manifest(&instance_dir, &manifest);
+    manifest.schema_version = 2;
+    save_manifest(&instance_dir, &manifest)?;
 
     {
         let mut manager = state.instances.lock().unwrap();
@@ -465,7 +513,7 @@ pub async fn install_instance_files(
     ilog!(
         &app,
         &log_id,
-        "Installation complete: {}/{} files",
+        "Installation complete: {}/{} files verified",
         total,
         total
     );

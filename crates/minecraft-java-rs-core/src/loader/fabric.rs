@@ -203,14 +203,25 @@ impl FabricMC {
             });
 
             if !dest.exists() {
+                let sha1 = lib
+                    .downloads
+                    .as_ref()
+                    .and_then(|d| d.artifact.as_ref())
+                    .and_then(|a| a.sha1.clone());
+                let size = lib
+                    .downloads
+                    .as_ref()
+                    .and_then(|d| d.artifact.as_ref())
+                    .and_then(|a| a.size)
+                    .unwrap_or(0);
                 pending.push(DownloadItem {
                     url,
                     path: dest,
                     folder,
                     name: lib_info.name,
-                    size: 0,
+                    size,
                     r#type: Some("libraries".into()),
-                    sha1: None,
+                    sha1,
                 });
             }
         }
@@ -222,15 +233,39 @@ impl FabricMC {
                 options.force_ipv4,
                 options.dns,
             );
-            downloader
+            let pending_paths: Vec<std::path::PathBuf> =
+                pending.iter().map(|i| i.path.clone()).collect();
+            if let Err(e) = downloader
                 .download_multiple(pending, event_tx.clone())
                 .await
-                .map_err(|e| {
-                    LoaderError::Io(std::io::Error::new(
+            {
+                // Fallback muy seguro: si tras el error TODOS los ficheros ya existen
+                // (por ejemplo porque el usuario tenía el jar local o se completó
+                // parcialmente), no bloquear el lanzamiento. Solo fallar si falta
+                // alguno.
+                let all_exist = pending_paths.iter().all(|p| p.exists());
+                if all_exist {
+                    eprintln!(
+                        "[fabric] download_libraries falló pero todos los ficheros ya existen localmente, continuando: {}",
+                        e
+                    );
+                } else {
+                    let missing: Vec<String> = pending_paths
+                        .iter()
+                        .filter(|p| !p.exists())
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    return Err(LoaderError::Io(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })?;
+                        format!(
+                            "No se pudieron descargar las librerías de Fabric ({}). Faltan: {}. Causa: {}",
+                            pending_paths.len(),
+                            missing.join(", "),
+                            e
+                        ),
+                    )));
+                }
+            }
         }
 
         Ok(items)

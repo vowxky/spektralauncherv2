@@ -85,7 +85,9 @@ impl NeoForgeMC {
             .join(&version_id)
             .join(format!("{version_id}.json"));
 
-        if !version_json_path.exists() {
+        let version_json_valid = read_version_json(&version_json_path).await.is_ok();
+        if !version_json_valid {
+            let _ = tokio::fs::remove_file(&version_json_path).await;
             let used_patcher = try_patcher_install(
                 &installer.file_path,
                 &loader_base,
@@ -106,9 +108,9 @@ impl NeoForgeMC {
                 run_installer(java_path, &installer.file_path, &loader_base, event_tx).await?;
             }
 
-            if !version_json_path.exists() {
+            if read_version_json(&version_json_path).await.is_err() {
                 return Err(LoaderError::ApiError(format!(
-                    "NeoForge installer finished but no version JSON was created at {}",
+                    "NeoForge installer finished but its version JSON is missing or corrupt at {}",
                     version_json_path.display()
                 )));
             }
@@ -183,7 +185,12 @@ impl NeoForgeMC {
         let installer_folder = options.loader_dir("neoforge").join("installer");
         let installer_path = installer_folder.join(&installer_name);
 
-        if !installer_path.exists() {
+        let installer_valid = installer_path.exists()
+            && read_installer_version_id(&installer_path.to_string_lossy())
+                .await
+                .is_ok();
+        if !installer_valid {
+            let _ = tokio::fs::remove_file(&installer_path).await;
             let url = format!("{maven_base}/{chosen}/{installer_name}");
             let item = DownloadItem {
                 url,

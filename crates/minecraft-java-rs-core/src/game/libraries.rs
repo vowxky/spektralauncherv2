@@ -451,7 +451,7 @@ fn extract_jar_to_dir(jar_path: &Path, dest: &Path) -> Result<(), LaunchError> {
 
         let mut data = Vec::with_capacity(entry.size() as usize);
         entry.read_to_end(&mut data)?;
-        std::fs::write(&out, &data)?;
+        crate::utils::persistence::write_atomic(&out, &data)?;
 
         #[cfg(unix)]
         {

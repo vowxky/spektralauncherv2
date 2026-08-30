@@ -32,14 +32,7 @@ impl InstanceManager {
 
     pub fn save(&self) {
         let path = Self::get_path();
-        let json = match serde_json::to_string_pretty(&self) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("[InstanceManager] serialize error: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = fs::write(&path, json) {
+        if let Err(e) = minecraft_java_rs_core::utils::persistence::save_json(&path, self) {
             eprintln!("[InstanceManager] no se pudo escribir {}: {}", path.display(), e);
         }
     }

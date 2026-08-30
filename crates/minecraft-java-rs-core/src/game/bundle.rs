@@ -64,8 +64,22 @@ pub async fn check_bundle(
                     if let Some(parent) = dest.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    if !dest.exists() {
-                        tokio::fs::write(&dest, content).await?;
+                    let current_matches = tokio::fs::read(&dest)
+                        .await
+                        .map(|existing| existing == content.as_bytes())
+                        .unwrap_or(false);
+                    if !current_matches {
+                        let bytes = content.into_bytes();
+                        tokio::task::spawn_blocking(move || {
+                            crate::utils::persistence::write_atomic(&dest, &bytes)
+                        })
+                        .await
+                        .map_err(|error| {
+                            LaunchError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                error.to_string(),
+                            ))
+                        })??;
                     }
                     Ok(None)
                 }
@@ -294,7 +308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_bundle_skips_existing_cfile() {
+    async fn check_bundle_repairs_existing_cfile() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("file.json");
         tokio::fs::write(&path, b"original").await.unwrap();
@@ -304,7 +318,7 @@ mod tests {
         check_bundle(&bundle, &tx, 4).await.unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "original");
+        assert_eq!(content, "new content");
     }
 
     #[tokio::test]

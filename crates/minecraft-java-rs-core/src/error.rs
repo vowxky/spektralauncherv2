@@ -89,6 +89,13 @@ pub enum DownloadError {
         actual: String,
     },
 
+    #[error("size mismatch for '{file}': expected {expected} bytes, got {actual}")]
+    SizeMismatch {
+        file: String,
+        expected: u64,
+        actual: u64,
+    },
+
     #[error("no mirror available for: {0}")]
     NoMirrorAvailable(String),
 

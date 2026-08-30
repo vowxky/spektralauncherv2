@@ -56,16 +56,19 @@ const GAME_DATA_FILE: &str = "gameData.json";
 
 pub async fn load_game_data(dir: &Path) -> Result<GameData, LaunchError> {
     let path = dir.join(GAME_DATA_FILE);
-    let raw = tokio::fs::read_to_string(&path).await?;
-    let data = serde_json::from_str(&raw)?;
-    Ok(data)
+    tokio::task::spawn_blocking(move || crate::utils::persistence::load_json(&path))
+        .await
+        .map_err(|error| LaunchError::CorruptCache(error.to_string()))?
+        .map_err(LaunchError::CorruptCache)
 }
 
 pub async fn save_game_data(dir: &Path, data: &GameData) -> Result<(), LaunchError> {
-    tokio::fs::create_dir_all(dir).await?;
-    let json = serde_json::to_string_pretty(data)?;
-    tokio::fs::write(dir.join(GAME_DATA_FILE), json).await?;
-    Ok(())
+    let path = dir.join(GAME_DATA_FILE);
+    let data = data.clone();
+    tokio::task::spawn_blocking(move || crate::utils::persistence::save_json(&path, &data))
+        .await
+        .map_err(|error| LaunchError::CorruptCache(error.to_string()))?
+        .map_err(LaunchError::CorruptCache)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

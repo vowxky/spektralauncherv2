@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc::Sender;
@@ -57,8 +58,14 @@ pub async fn get_java_files(
         .join(&platform);
 
     let java_bin = find_cached_java_bin(&runtime_root);
+    let completion_marker = runtime_root.join(".complete");
 
-    if java_bin.exists() {
+    if java_bin
+        .metadata()
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
+        && completion_marker.exists()
+    {
         return Ok(JavaDownloadResult {
             java_path: java_bin.to_string_lossy().into_owned(),
             files: vec![],
@@ -347,6 +354,8 @@ async fn try_mojang(
         .next()
         .unwrap_or_else(|| java_bin_path(runtime_root));
 
+    crate::utils::persistence::write_atomic(&runtime_root.join(".complete"), b"mojang\n")?;
+
     Ok(Some(JavaDownloadResult {
         java_path: java_bin.to_string_lossy().into_owned(),
         files: file_records,
@@ -433,6 +442,14 @@ async fn get_from_adoptium(
         let _ = std::fs::set_permissions(&java_bin, perms);
     }
 
+    if !java_bin.exists() {
+        return Err(LaunchError::CorruptCache(format!(
+            "Java extraction finished without a runtime at {}",
+            java_bin.display()
+        )));
+    }
+    crate::utils::persistence::write_atomic(&runtime_root.join(".complete"), b"adoptium\n")?;
+
     Ok(JavaDownloadResult {
         java_path: java_bin.to_string_lossy().into_owned(),
         files: vec![JavaFileItem {
@@ -461,14 +478,19 @@ async fn extract_zip_to(archive: PathBuf, dest: &Path) -> Result<(), LaunchError
             if entry.is_dir() {
                 continue;
             }
-            let name = entry.name().to_owned();
-            let stripped = name.splitn(2, '/').nth(1).unwrap_or(&name).to_owned();
-            let out = dest.join(&stripped);
-            if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent)?;
+            let enclosed = entry.enclosed_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "unsafe Java archive path")
+            })?;
+            let mut components = enclosed.components();
+            let _ = components.next();
+            let stripped: PathBuf = components.collect();
+            if stripped.as_os_str().is_empty() {
+                continue;
             }
-            let mut f = std::fs::File::create(&out)?;
-            std::io::copy(&mut entry, &mut f)?;
+            let out = dest.join(stripped);
+            let mut contents = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut contents)?;
+            crate::utils::persistence::write_atomic(&out, &contents)?;
         }
         Ok(())
     })
@@ -706,7 +728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_java_files_returns_cached_when_binary_exists() {
+    async fn get_java_files_returns_cached_when_runtime_is_complete() {
         use tempfile::TempDir;
         use tokio::sync::mpsc;
 
@@ -720,6 +742,9 @@ mod tests {
         let bin_dir = runtime_root.join("bin");
         tokio::fs::create_dir_all(&bin_dir).await.unwrap();
         tokio::fs::write(bin_dir.join("java"), b"#!/bin/sh\nexec java")
+            .await
+            .unwrap();
+        tokio::fs::write(runtime_root.join(".complete"), b"mojang\n")
             .await
             .unwrap();
 

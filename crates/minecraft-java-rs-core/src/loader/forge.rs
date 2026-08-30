@@ -82,7 +82,9 @@ impl ForgeMC {
             .join(format!("{version_id}.json"));
 
         // 3. Install: try the manual patcher first; fall back to --installClient.
-        if !version_json_path.exists() {
+        let version_json_valid = read_version_json(&version_json_path).await.is_ok();
+        if !version_json_valid {
+            let _ = tokio::fs::remove_file(&version_json_path).await;
             let used_patcher = try_patcher_install(
                 &installer.file_path,
                 &loader_base,
@@ -103,9 +105,9 @@ impl ForgeMC {
                 run_installer(java_path, &installer.file_path, &loader_base, event_tx).await?;
             }
 
-            if !version_json_path.exists() {
+            if read_version_json(&version_json_path).await.is_err() {
                 return Err(LoaderError::ApiError(format!(
-                    "Forge install finished but no version JSON found at {}",
+                    "Forge install finished but its version JSON is missing or corrupt at {}",
                     version_json_path.display()
                 )));
             }
@@ -158,7 +160,12 @@ impl ForgeMC {
         let installer_folder = options.loader_dir("forge").join("installer");
         let installer_path = installer_folder.join(&installer_name);
 
-        if !installer_path.exists() {
+        let installer_valid = installer_path.exists()
+            && read_installer_version_id(&installer_path.to_string_lossy())
+                .await
+                .is_ok();
+        if !installer_valid {
+            let _ = tokio::fs::remove_file(&installer_path).await;
             let url = format!("{MAVEN_BASE}/{forge_build}/{installer_name}");
             let item = DownloadItem {
                 url: url.clone(),
@@ -686,10 +693,12 @@ async fn install_old_forge_legacy(
 ) -> Result<(), LoaderError> {
     let version_info = profile.version_info.as_ref().expect("caller checked Some");
 
-    if let Some(parent) = version_json_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(version_json_path, serde_json::to_vec_pretty(version_info)?).await?;
+    let path = version_json_path.to_path_buf();
+    let contents = serde_json::to_vec_pretty(version_info)?;
+    tokio::task::spawn_blocking(move || crate::utils::persistence::write_atomic(&path, &contents))
+        .await
+        .map_err(|error| LoaderError::ApiError(error.to_string()))?
+        .map_err(LoaderError::Io)?;
     let _ = event_tx
         .send(LaunchEvent::Patch(
             "[patcher] Old-format Forge: wrote version JSON".into(),
@@ -752,11 +761,12 @@ async fn extract_version_json(installer_path: &str, dest_path: &Path) -> Result<
         }
     };
 
-    if let Some(parent) = dest_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(dest_path, &bytes).await?;
-    Ok(())
+    serde_json::from_slice::<serde_json::Value>(&bytes)?;
+    let path = dest_path.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::utils::persistence::write_atomic(&path, &bytes))
+        .await
+        .map_err(|error| LoaderError::ApiError(error.to_string()))?
+        .map_err(LoaderError::Io)
 }
 
 /// Extract all `maven/` entries from the installer JAR into `libs_dir`.

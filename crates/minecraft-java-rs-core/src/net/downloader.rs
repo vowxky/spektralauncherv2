@@ -15,6 +15,8 @@ use crate::launcher::events::LaunchEvent;
 
 const DOWNLOAD_MAX_RETRIES: u32 = 3;
 const DOWNLOAD_INITIAL_BACKOFF_MS: u64 = 500;
+const COMMIT_MAX_RETRIES: u32 = 8;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── DownloadItem ──────────────────────────────────────────────────────────────
 
@@ -201,7 +203,7 @@ fn adaptive_concurrency(requested: u32) -> usize {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let cap = (cpu_count * 8).min(64).max(4);
+    let cap = (cpu_count * 4).min(24).max(4);
     (requested as usize).clamp(1, cap)
 }
 
@@ -250,10 +252,13 @@ async fn fetch_one(
     };
     tokio::fs::create_dir_all(&dir).await?;
 
-    // Temporary path: `foo.jar` → `foo.jar.tmp`
     let tmp_path = {
         let mut s = item.path.as_os_str().to_owned();
-        s.push(".tmp");
+        s.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         PathBuf::from(s)
     };
 
@@ -300,6 +305,7 @@ async fn fetch_one(
         let mut hasher = sha1::Sha1::new();
         let verify = item.sha1.is_some();
         let mut stream_err: Option<DownloadError> = None;
+        let mut attempt_bytes = 0u64;
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
@@ -310,6 +316,7 @@ async fn fetch_one(
                     if verify {
                         hasher.update(&chunk);
                     }
+                    attempt_bytes += chunk.len() as u64;
                     dl_counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -320,12 +327,29 @@ async fn fetch_one(
         }
 
         if let Some(e) = stream_err {
+            dl_counter.fetch_sub(attempt_bytes, Ordering::Relaxed);
             last_err = Some(e);
             continue;
         }
 
         if let Err(e) = file.flush().await {
             return Err(DownloadError::Io(e));
+        }
+        if let Err(e) = file.sync_all().await {
+            return Err(DownloadError::Io(e));
+        }
+
+        if item.size > 0 && attempt_bytes != item.size {
+            dl_counter.fetch_sub(attempt_bytes, Ordering::Relaxed);
+            last_err = Some(DownloadError::SizeMismatch {
+                file: item.name.clone(),
+                expected: item.size,
+                actual: attempt_bytes,
+            });
+            if attempt < DOWNLOAD_MAX_RETRIES {
+                continue;
+            }
+            break;
         }
 
         // ── Checksum ──────────────────────────────────────────────────────────
@@ -336,21 +360,48 @@ async fn fetch_one(
                 .map(|b| format!("{b:02x}"))
                 .collect();
             if actual != *expected {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(DownloadError::ChecksumMismatch {
+                dl_counter.fetch_sub(attempt_bytes, Ordering::Relaxed);
+                last_err = Some(DownloadError::ChecksumMismatch {
                     file: item.name.clone(),
                     expected: expected.clone(),
                     actual,
                 });
+                if attempt < DOWNLOAD_MAX_RETRIES {
+                    continue;
+                }
+                break;
             }
         }
 
-        // ── Atomic rename ─────────────────────────────────────────────────────
-        if let Err(e) = tokio::fs::rename(&tmp_path, &item.path).await {
-            return Err(DownloadError::Io(e));
+        drop(file);
+        let mut commit_delay = 40u64;
+        let mut commit_error = None;
+        for commit_attempt in 0..=COMMIT_MAX_RETRIES {
+            if item.path.exists() {
+                match tokio::fs::remove_file(&item.path).await {
+                    Ok(()) => {}
+                    Err(e) if commit_attempt < COMMIT_MAX_RETRIES => {
+                        commit_error = Some(e);
+                        tokio::time::sleep(Duration::from_millis(commit_delay)).await;
+                        commit_delay = (commit_delay * 2).min(1_000);
+                        continue;
+                    }
+                    Err(e) => return Err(DownloadError::Io(e)),
+                }
+            }
+            match tokio::fs::rename(&tmp_path, &item.path).await {
+                Ok(()) => return Ok(()),
+                Err(e) if commit_attempt < COMMIT_MAX_RETRIES => {
+                    commit_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(commit_delay)).await;
+                    commit_delay = (commit_delay * 2).min(1_000);
+                }
+                Err(e) => return Err(DownloadError::Io(e)),
+            }
         }
-
-        return Ok(());
+        return Err(DownloadError::Io(commit_error.unwrap_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "download commit failed")
+        })));
     }
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -364,6 +415,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_downloader() -> Downloader {
         Downloader::new(5, 4, false, None)
@@ -459,14 +512,38 @@ mod tests {
         let d = Downloader::new(1, 1, false, None);
         let _ = d.download_file(&item).await;
 
-        let tmp = {
-            let mut s = path.as_os_str().to_owned();
-            s.push(".tmp");
-            PathBuf::from(s)
+        let has_temp = std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+                .is_some_and(|name| name.starts_with("out.bin.") && name.ends_with(".tmp"))
+        });
+        assert!(!has_temp, "temporary file should be cleaned up after failure");
+    }
+
+    #[tokio::test]
+    async fn download_replaces_existing_file_after_verification() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new"))
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let destination = dir.path().join("out.bin");
+        std::fs::write(&destination, b"old").unwrap();
+        let item = DownloadItem {
+            url: format!("{}/file", server.uri()),
+            path: destination.clone(),
+            folder: dir.path().to_path_buf(),
+            name: "out.bin".into(),
+            size: 3,
+            r#type: None,
+            sha1: Some("c2a6b03f190dfb2b4aa91f8af8d477a9bc3401dc".into()),
         };
-        assert!(
-            !tmp.exists(),
-            ".tmp file should be cleaned up after failure"
-        );
+
+        make_downloader().download_file(&item).await.unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"new");
     }
 }
