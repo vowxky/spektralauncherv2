@@ -338,24 +338,24 @@ pub async fn install_instance_files(
         let local_path = safe_instance_path(&instance_dir, &file.path)?;
         let expected_hash = file.hashes.sha1.as_ref().map(|hash| hash.to_lowercase());
         let expected_size = file.size.unwrap_or(0);
-        let size_matches = local_path
-            .metadata()
-            .map(|metadata| expected_size == 0 || metadata.len() == expected_size)
-            .unwrap_or(false);
-        let existing_hash = if local_path.exists()
-            && size_matches
-            && expected_hash.is_some()
-        {
+        // SHA-1 is truth — size is advisory. Compute hash regardless of size
+        // so a stale manifest size (333505 vs 333484) doesn't force a redownload
+        // when the actual file is already correct.
+        let existing_hash = if local_path.exists() && expected_hash.is_some() {
             sha1_file(&local_path).ok()
         } else {
             None
         };
-        let valid = local_path.exists()
-            && size_matches
-            && match &expected_hash {
-                Some(hash) => existing_hash.as_ref() == Some(hash),
-                None => true,
-            };
+        let valid = if let Some(hash) = &expected_hash {
+            existing_hash.as_ref() == Some(hash)
+        } else {
+            // No hash in manifest — fall back to size check
+            local_path
+                .metadata()
+                .map(|m| expected_size == 0 || m.len() == expected_size)
+                .unwrap_or(false)
+                && local_path.exists()
+        };
 
         if valid {
             new_hashes.insert(

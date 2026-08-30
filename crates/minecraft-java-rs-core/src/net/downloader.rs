@@ -339,7 +339,11 @@ async fn fetch_one(
             return Err(DownloadError::Io(e));
         }
 
-        if item.size > 0 && attempt_bytes != item.size {
+        // Size is advisory only — SHA-1 is the source of truth.
+        // If a SHA-1 is provided we let the checksum decide; a stale manifest
+        // size (e.g. 333505 vs 333484) no longer blocks the install.
+        let size_mismatch = item.size > 0 && attempt_bytes != item.size;
+        if size_mismatch && item.sha1.is_none() {
             dl_counter.fetch_sub(attempt_bytes, Ordering::Relaxed);
             last_err = Some(DownloadError::SizeMismatch {
                 file: item.name.clone(),
@@ -352,7 +356,7 @@ async fn fetch_one(
             break;
         }
 
-        // ── Checksum ──────────────────────────────────────────────────────────
+        // ── Checksum (SHA-1 is truth) ───────────────────────────────────────
         if let Some(expected) = &item.sha1 {
             let actual: String = hasher
                 .finalize()
